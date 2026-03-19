@@ -184,16 +184,22 @@ Bad expectations: "Output looks reasonable", "Claude used the skill", "Output is
 
 TRIGGER BRANCH — how trigger detection works:
   skill_name is read from the target plugin's SKILL.md frontmatter `name:` field before the loop starts.
-  The detection pattern is: "Using {skill_name} to" (case-insensitive).
-  This pattern is emitted by Claude Code whenever a skill is invoked — it is a platform-level
-  announcement that appears in the transcript for any plugin following the SKILL.md format.
-  All plugins built or processed by perfect-plugin use SKILL.md, so this pattern is always present.
+
+  Detection mechanism: each trigger query is augmented with a meta-instruction appended after
+  the query text (via a system prompt flag, NOT visible in the query content):
+    System addition: "After completing your response, on a new line write exactly:
+    SKILL_USED: <skill-name-you-used> or SKILL_USED: none"
+
+  run_evals.py reads `skill_name` from SKILL.md and appends this system instruction.
+  After receiving Claude's response, it searches the final line for "SKILL_USED: {skill_name}"
+  (case-insensitive). This mechanism works regardless of whether superpowers is installed.
 
   For each run in 1..runs_per_eval:
     For each entry in trigger-eval.json:
-      Run: claude -p "<query>" --plugin <plugin_path>
+      Run: claude -p "<query>" --plugin <plugin_path> \
+           --system "After completing your response, on a new line write: SKILL_USED: <skill-name> or SKILL_USED: none"
       Capture full stdout transcript
-      Detect trigger: search transcript (case-insensitive) for "Using {skill_name} to"
+      Detect trigger: search last 3 lines for "SKILL_USED: {skill_name}" (case-insensitive)
         If found → triggered = true
         If not found → triggered = false
       did_trigger_correctly = (triggered == entry.should_trigger)
@@ -202,6 +208,7 @@ TRIGGER BRANCH — how trigger detection works:
 
 FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
   input_files in evals.json provide INPUT context to the eval prompt; they are not output artefacts.
+  Functional evals also run runs_per_eval times (same value as trigger evals).
 
   run_evals.py handles transcript generation only. Grader dispatch is handled by Claude
   (the main session), NOT by the Python script, because Claude agents cannot be spawned
@@ -222,20 +229,28 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
     Wait for all graders to complete (all grading.json files exist)
 
   run_evals.py Step 3 — score computation (called again by Claude after graders complete):
-    For each eval: collect pass_rate from all grading.json files → compute median
-    functional_score = average of per-eval median pass_rates × 100
+    For each eval: collect pass_rate values from its N grading.json files (one per run)
+    Compute per-eval median: median(pass_rate_run_1, pass_rate_run_2, ..., pass_rate_run_N)
+    functional_score = average(per-eval medians) × 100
+    (i.e., average the per-eval medians across all evals, not a flat average across all runs)
     Call score.py (step 3 below)
 
-3. Call score.py:
-   Input JSON: {trigger_score, functional_score, previous_best (from step 1),
-                weights: scoring.weights, noise_floor: scoring.noise_floor}
-   Receives output JSON: {combined, delta, is_improvement}
+3. Call score.py (subprocess):
+   echo '{"trigger_score": X, "functional_score": Y, "previous_best": Z,
+          "weights": {"trigger": 0.4, "functional": 0.6}, "noise_floor": 2.0}' | python score.py
+   Receives JSON on stdout: {combined, delta, is_improvement}
+   previous_best = history.best_score read from perfect-plugin.json in step 1
+   weights and noise_floor read from perfect-plugin.json scoring config
 
-4. Output JSON (schema below)
+4. Output JSON written to evals/last-run.json (schema below)
 
 **run_evals.py supports two modes:**
-- `--generate-transcripts`: runs claude -p for trigger queries + eval prompts, writes transcripts-to-grade.json, exits
-- `--score` (default after graders complete): reads grading.json files, calls score.py, outputs score JSON
+- `--generate-transcripts`: runs claude -p for trigger queries + eval prompts, writes
+  evals/transcripts-to-grade.json. Each entry includes the exact `output_path` where
+  the grader MUST write its grading.json. This `output_path` is the canonical write
+  destination and overrides any path convention from the source grader.md.
+- `--score`: reads grading.json files (paths from evals/transcripts-to-grade.json output_path fields),
+  calls score.py via subprocess (stdin JSON → stdout JSON), outputs evals/last-run.json
 ```
 
 ### `run_evals.py` Output Schema
