@@ -609,8 +609,10 @@ is_improvement = false → DISCARD
   if git revert conflicts:
     git revert --abort         ← cancels in-progress revert, HEAD still points to experiment commit
     git reset --hard HEAD~1    ← moves HEAD back to pre-experiment commit, discards experiment commit
-    (after this path: repo is at pre-experiment commit; history.best_commit is unaffected
-     since it pointed to an earlier good commit, not to the discarded experiment)
+    (after this path: repo is at pre-experiment commit; history.best_commit is always
+     reachable because it is only written on KEEP, never on the experiment commit being
+     discarded — so history.best_commit points to HEAD~1 or an earlier commit, both of
+     which remain reachable after reset --hard HEAD~1)
   loop.current_iteration += 1 (both paths)
 
 crashed (run_evals.py failed, OOM, timeout) → fix if fixable (max 3 tries), else treat as DISCARD
@@ -618,10 +620,11 @@ crashed (run_evals.py failed, OOM, timeout) → fix if fixable (max 3 tries), el
 
 (validation-failed and no-op are handled in Phase 4 — do NOT increment current_iteration for these)
 
-no-op infinite loop prevention: if 3 consecutive no-op rows appear in the TSV, treat the next
-iteration as a forced crash (log status=crash, increment current_iteration) and apply Phase 2
-rule 6 (radical change) at the next Phase 2. This escapes agent stuck states where every
-proposed change produces no diff.
+no-op infinite loop prevention: if the last 3 rows in the TSV (read in Phase 1) all have
+status=no-op, the agent MUST treat the current Phase 3 attempt as a forced crash instead
+of making another no-op attempt: skip Phase 3-4, log status=crash in TSV, increment
+current_iteration, and apply Phase 2 rule 6 (radical change strategy) at the next Phase 2.
+The streak counter is derived from reading the TSV tail — no separate counter needed.
 ```
 
 **Phase 7 — Log:**
