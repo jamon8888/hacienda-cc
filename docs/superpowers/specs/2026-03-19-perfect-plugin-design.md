@@ -170,10 +170,15 @@ Bad expectations: "Output looks reasonable", "Claude used the skill", "Output is
 
 ## `run_evals.py` — Full Execution Path
 
+**Invocation convention:** `run_evals.py` must always be invoked with the target plugin root as the
+current working directory. It reads `./perfect-plugin.json` (always relative to cwd). All paths
+in `perfect-plugin.json` are relative to that same cwd. The loop commands (Phase 0, 4, 5) must
+`cd` to the plugin root before calling any script.
+
 `run_evals.py` is the central orchestrator. Full flow:
 
 ```
-1. Read perfect-plugin.json → get eval paths, runs_per_eval, plugin_path, scoring config
+1. Read ./perfect-plugin.json → get eval paths, runs_per_eval, plugin_path, scoring config
    Read history.best_score from perfect-plugin.json → this is previous_best for score.py
    Null-coercion: if history.best_score is null (state file freshly created), treat previous_best = 0
 
@@ -248,8 +253,10 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
     Wait for all graders to complete (all grading.json files exist)
 
   run_evals.py Step 3 — score computation (called again by Claude after graders complete):
-    For each eval: collect pass_rate values from its N grading.json files (one per run)
-    Compute per-eval median: median(pass_rate_run_1, pass_rate_run_2, ..., pass_rate_run_N)
+    Re-read evals/transcripts-to-grade.json to get the list of output_path values
+    Re-read evals/trigger-results.json to get trigger query results
+    For each eval: read grading.json at the output_path listed in transcripts-to-grade.json
+    Compute per-eval median: median(grading.summary.pass_rate across all N runs for that eval)
     functional_score = average(per-eval medians) × 100
     (i.e., average the per-eval medians across all evals, not a flat average across all runs)
     Call score.py (step 3 below)
@@ -275,10 +282,10 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
 - `--baseline` (modifier for `--score` only): used as `python run_evals.py --score --baseline`.
   Behavior difference from plain `--score`:
     - Passes previous_best = 0 to score.py (ignores history.best_score)
-    - After score.py returns combined_score: writes combined_score to BOTH
-      history.baseline_score AND history.best_score in perfect-plugin.json
-    - Writes evals/last-run.json with delta = 0.0, is_improvement = false
-      (since it is the baseline, there is no prior score to beat)
+    - score.py runs normally and returns {combined, delta, is_improvement}
+    - run_evals.py then OVERRIDES delta and is_improvement before writing last-run.json:
+        delta = 0.0, is_improvement = false (baseline has no prior score to beat)
+    - Writes combined_score to BOTH history.baseline_score AND history.best_score in perfect-plugin.json
   Cannot be combined with --generate-transcripts.
 ```
 
@@ -381,7 +388,7 @@ Exits non-zero on any failure. Prints the failing rule name and the offending fi
 | 3 | Every `description:` in frontmatter is under 1024 chars and contains no `<` or `>` | From plugin-forge quick_validate.py |
 | 4 | Every agent file's `tools:` frontmatter field is a YAML sequence (not a comma-separated string) | New |
 | 5 | No string matching `^/Users/`, `^C:\\`, `^/home/`, `^/root/` appears in any scanned file | New |
-| 6 | Any path string in `hooks/hooks.json` that references a plugin file uses `${CLAUDE_PLUGIN_ROOT}` — detected by scanning for absolute paths in the `command` fields of `hooks.json` | New |
+| 6 | If `hooks/hooks.json` exists: any path in `command` fields that references a plugin file must use `${CLAUDE_PLUGIN_ROOT}`. If `hooks/hooks.json` does not exist, Rule 6 passes silently. | New |
 
 ---
 
@@ -567,6 +574,8 @@ Output ONLY the insight text. No headers. No JSON.
 
 Agent writes its output to `evals/analyzer-insight.md` (plain text, overwritten each time). Phase 1 of the next iteration reads this file. The analyzer does not run on discard, crash, no-op, or validation-failed outcomes.
 
+**Stale file behavior:** `evals/analyzer-insight.md` is intentionally NOT cleared on discard, crash, or no-op. It retains the insight from the most recent successful improvement. This is correct: the agent should still know what worked last time, even if subsequent iterations failed. The file is only overwritten when a new improvement occurs.
+
 **Phase 6 — Decide:**
 ```
 is_improvement = true (from run_evals.py output JSON field "is_improvement", set by score.py) → KEEP
@@ -728,7 +737,7 @@ Logic: `combined = t×0.4 + f×0.6`. `delta = combined - previous_best`. `is_imp
 1. `/collect` → `/build` → `/optimize` (Iterations: 10) produces a git-tracked plugin with a TSV log showing score progression. **Measurable:** `git log` shows baseline + experiment commits; `wc -l perfect-plugin-results.tsv` ≥ 2; TSV has ≥1 row with `status=keep`.
 2. Optimize loop runs without `AskUserQuestion` in phases 1–8. **Measurable:** grep for `AskUserQuestion` in loop output = 0 matches.
 3. Converted CC plugin passes `validate_plugin.py` and scores within 5 points of `convert.original_score`. **Measurable:** `|post_convert_score - convert.original_score| ≤ 5`.
-4. TSV has exactly one row per iteration. **Measurable:** `wc -l perfect-plugin-results.tsv` = `loop.current_iteration + 1` (baseline row + one per iteration).
+4. Every phase produces exactly one TSV row. **Measurable:** `wc -l perfect-plugin-results.tsv` = 1 (baseline) + `loop.current_iteration` (keep/discard/crash) + count(validation-failed rows) + count(no-op rows). Note: `validation-failed` and `no-op` each produce a TSV row but do NOT increment `loop.current_iteration`.
 
 ---
 
