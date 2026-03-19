@@ -1,7 +1,7 @@
 # perfect-plugin — Design Spec
 
 **Date:** 2026-03-19
-**Status:** Approved (v3 — post second spec-review)
+**Status:** Draft (v16 — pending spec review round 14)
 
 ---
 
@@ -121,6 +121,7 @@ Lives at the root of the **target plugin** directory. All relative paths resolve
 - `loop.status = "crashed"`: set when the last run terminated abnormally, enabling deterministic resumption.
 - `history.best_commit`: written at Phase 6 whenever a new best score is achieved (`git rev-parse --short HEAD`). Read during crash recovery to restore best known state.
 - `convert.original_score`: stores pre-conversion combined score for the 5-point acceptance criterion.
+- `convert.original_platform`: written by `/convert` at step 1 (before any modifications), recording the `platform` field value from `perfect-plugin.json` at time of conversion. Used to confirm what the source platform was if the conversion report is reviewed later.
 - `use_cases[].id`: human-traceability only. Not consumed by scripts or agents.
 
 **Git tracking:** `perfect-plugin.json` and `perfect-plugin-results.tsv` MUST be gitignored at the target plugin root. Neither file is committed to git. The loop writes to these files freely between commits; git reset/revert operations must not affect loop state.
@@ -310,8 +311,13 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
         last-run.json.delta = 0.0
         last-run.json.is_improvement = false
       (combined_score in last-run.json = score.py's combined value, unchanged)
-    - After writing last-run.json: writes score.py's combined value to BOTH
-      history.baseline_score AND history.best_score in perfect-plugin.json
+    - After writing last-run.json:
+        Always writes score.py's combined value to history.baseline_score.
+        Writes score.py's combined value to history.best_score ONLY IF
+        history.best_score is currently null. If history.best_score already has a value
+        (set by a prior KEEP in a resumed run), best_score is left unchanged. This
+        prevents Phase 0 from erasing a higher best_score accumulated during a
+        partial optimize run.
   Cannot be combined with --generate-transcripts.
 ```
 
@@ -435,8 +441,9 @@ iteration	commit	trigger	functional	combined	delta	validate	status	description
 ```
 
 **Column definitions:**
-- `validate`: `pass` (validate_plugin.py passed), `fail` (validate_plugin.py failed), `-` (not run — crash or no-op before validation)
+- `validate`: valid values are `pass`, `fail`, or `-` — no other values are valid. `pass` = validate_plugin.py exited 0. `fail` = validate_plugin.py exited non-zero. `-` = validate_plugin.py did not run (crash, no-op, or hook-blocked — any outcome that did not reach the validation step).
 - `status` values: `baseline`, `keep`, `discard`, `validation-failed` (validate_plugin failed before eval ran), `crash`, `no-op`, `hook-blocked` (git pre-commit hook rejected commit — distinct from validate_plugin failure)
+- `description`: one-sentence human-readable description of what was attempted. For `baseline`: write `"initial state"`. For `keep`, `discard`, `crash`: copy the text from the `experiment(skill):` git commit message (the `<one-sentence description>` from Phase 4 commit). For `validation-failed`, `no-op`, `hook-blocked`: write a brief note explaining the outcome (e.g., `"SKILL.md description exceeded 1024 chars"`, `"attempted change produced no diff"`, `"pre-commit hook rejected commit"`).
 - Sentinel `-` in metric columns (`trigger`, `functional`, `combined`, `delta`): used when no eval ran
 
 **Distinction between `validation-failed` and `hook-blocked`:** `validation-failed` = `validate_plugin.py` returned non-zero before the git commit. `hook-blocked` = git pre-commit hook (not validate_plugin.py) rejected the commit. These are separate scenarios with separate status labels.
@@ -500,7 +507,8 @@ Executes the 8-phase loop from `optimize-loop.md`. Stops when `combined_score >=
 **Precondition:** `evals/trigger-eval.json` and `evals/evals.json` must exist. If either is missing,
 abort with: "Run `/perfect-plugin:collect` first to generate evals before converting." Do not proceed.
 
-1. Runs `run_evals.py --generate-transcripts` → Claude dispatches graders → `run_evals.py --score`
+1. Writes the current `platform` field value to `convert.original_platform` in state file.
+   Runs `run_evals.py --generate-transcripts` → Claude dispatches graders → `run_evals.py --score`
    on the existing CC plugin → stores combined_score result as `convert.original_score` in state file.
    `previous_best` for score.py = history.best_score ?? 0 (same null-coercion as all other invocations).
    The delta/is_improvement fields in last-run.json from this step are informational only;
@@ -634,11 +642,15 @@ crashed (run_evals.py failed, OOM, timeout) → fix if fixable (max 3 tries), el
 
 (validation-failed and no-op are handled in Phase 4 — do NOT increment current_iteration for these)
 
-no-op infinite loop prevention: if the last 3 rows in the TSV (read in Phase 1) all have
-status=no-op, the agent MUST treat the current Phase 3 attempt as a forced crash instead
-of making another no-op attempt: skip Phase 3-4, log status=crash in TSV, increment
-current_iteration, and apply Phase 2 rule 6 (radical change strategy) at the next Phase 2.
-The streak counter is derived from reading the TSV tail — no separate counter needed.
+no-op infinite loop prevention: read the 3 most recent TSV rows (any status). If ALL 3
+have status=no-op, the agent MUST treat the current Phase 3 attempt as a forced crash
+instead of making another no-op attempt: skip Phase 3-4, log status=crash in TSV,
+increment current_iteration, and apply Phase 2 rule 6 (radical change strategy) at the
+next Phase 2.
+Streak counting rule: a single `validation-failed`, `hook-blocked`, `discard`, `keep`,
+or `crash` row anywhere in the last 3 rows resets the streak — the last 3 must ALL be
+`no-op` to trigger. The streak counter is derived by reading `tail -3 perfect-plugin-results.tsv`
+(skipping the header line) — no separate counter needed.
 ```
 
 **Phase 7 — Log:**
@@ -688,7 +700,7 @@ The `pass_rate >= 0.5` threshold is canonical for trigger queries. For `runs_per
 
 | # | CC artifact detected | Cowork adaptation | Decision rule |
 |---|---|---|---|
-| 1 | `claude -p` in script with captured output fed to another process | Inline eval logic (rewrite as Python that calls Claude API directly) | Use inline if the output is parsed; use static JSON if the output is only displayed |
+| 1 | `claude -p` in script with captured output fed to another process | Rewrite as inline Python using the Anthropic SDK (`pip install anthropic`). Call shape: `from anthropic import Anthropic; result = Anthropic().messages.create(model="claude-opus-4-6", max_tokens=1024, messages=[{"role":"user","content":prompt}]).content[0].text` | Use inline if the output is parsed programmatically; use static JSON if the output is only displayed |
 | 2 | `claude -p` with HTML/browser display | `--static` flag for HTML output | Always static |
 | 3 | `input()`, `sys.stdin.read()`, interactive terminal prompts | `AskUserQuestion` tool call | Always |
 | 4 | Absolute paths in any file | `${CLAUDE_PLUGIN_ROOT}` prefix | Always |
