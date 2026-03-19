@@ -175,7 +175,10 @@ Bad expectations: "Output looks reasonable", "Claude used the skill", "Output is
 ```
 1. Read perfect-plugin.json → get eval paths, runs_per_eval, plugin_path, scoring config
    Read history.best_score from perfect-plugin.json → this is previous_best for score.py
-   (On --baseline flag: previous_best = 0, is_improvement check is skipped)
+   (On --baseline flag: previous_best = 0. score.py is still called normally.
+    After score.py returns combined_score: write combined_score to BOTH
+    history.baseline_score AND history.best_score in perfect-plugin.json.
+    The is_improvement value returned by score.py is ignored on --baseline runs.)
 
 2. Run trigger and functional branches IN PARALLEL (two subprocesses)
 
@@ -471,7 +474,7 @@ Agent writes its output to `evals/analyzer-insight.md` (plain text, overwritten 
 
 **Phase 6 — Decide:**
 ```
-is_improvement = true (Phase 4 commit succeeded) → KEEP
+is_improvement = true (from run_evals.py output JSON field "is_improvement", set by score.py) → KEEP
   write history.best_score = combined_score to state file
   write history.best_commit = git rev-parse --short HEAD to state file
   increment loop.current_iteration
@@ -506,13 +509,23 @@ On unexpected exit: set `loop.status = "crashed"` in state file.
 
 ## Scoring
 
+**Canonical formulas (matching run_evals.py Execution Path):**
+
 ```
-trigger_score    = (correct trigger queries, median across runs) / total × 100
-functional_score = average of per-eval median pass_rates across runs × 100
-combined_score   = (trigger_score × 0.4) + (functional_score × 0.6)
+Per trigger query:
+  pass_rate_q = count(did_trigger_correctly across all runs) / runs_per_eval
+trigger_score = (queries where pass_rate_q >= 0.5) / total_queries × 100
+
+Per functional eval:
+  pass_rate_e = median(grading.summary.pass_rate across all runs)
+functional_score = average(pass_rate_e for all evals) × 100
+
+combined_score = (trigger_score × 0.4) + (functional_score × 0.6)
 ```
 
-`score.py` receives `trigger_score` and `functional_score` (already medians computed by `run_evals.py`). It applies weights and noise_floor check. It does NOT re-run evals or compute medians itself.
+The `pass_rate >= 0.5` threshold is canonical for trigger queries. For `runs_per_eval = 3` this requires ≥2 correct detections; for `runs_per_eval = 2` this requires both runs to be correct. Do not substitute a "median of binary values" formulation — use the threshold formula.
+
+`score.py` receives `trigger_score` and `functional_score` already computed by `run_evals.py`. It applies weights and noise_floor. It does NOT re-compute medians or thresholds.
 
 ---
 
