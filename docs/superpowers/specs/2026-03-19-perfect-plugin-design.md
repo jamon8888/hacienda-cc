@@ -1,7 +1,7 @@
 # perfect-plugin — Design Spec
 
 **Date:** 2026-03-19
-**Status:** Draft (v16 — pending spec review round 14)
+**Status:** Approved (v16 — final)
 
 ---
 
