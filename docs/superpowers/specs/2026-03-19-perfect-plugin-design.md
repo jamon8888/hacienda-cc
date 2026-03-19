@@ -123,6 +123,8 @@ Lives at the root of the **target plugin** directory. All relative paths resolve
 - `convert.original_score`: stores pre-conversion combined score for the 5-point acceptance criterion.
 - `use_cases[].id`: human-traceability only. Not consumed by scripts or agents.
 
+**Git tracking:** `perfect-plugin.json` and `perfect-plugin-results.tsv` MUST be gitignored at the target plugin root. Neither file is committed to git. The loop writes to these files freely between commits; git reset/revert operations must not affect loop state.
+
 ---
 
 ## Eval File Schemas
@@ -182,7 +184,10 @@ in `perfect-plugin.json` are relative to that same cwd. The loop commands (Phase
    Read history.best_score from perfect-plugin.json → this is previous_best for score.py
    Null-coercion: if history.best_score is null (state file freshly created), treat previous_best = 0
 
-2. Run trigger and functional branches IN PARALLEL (two subprocesses)
+2. Run trigger and functional branches within a SINGLE --generate-transcripts invocation.
+   Both branches run concurrently (two subprocesses) within the same process.
+   The process exits only after BOTH branches have completed and BOTH output files are written.
+   (There is no separate invocation for each branch — --generate-transcripts is one command.)
 
 TRIGGER BRANCH — how trigger detection works:
   skill_name is read from the target plugin's SKILL.md frontmatter `name:` field before the loop starts.
@@ -222,7 +227,12 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
         context_flags = ["--context " + f for f in eval.input_files]  # may be empty
         Run: claude -p "<eval.prompt>" --plugin <plugin_path> <context_flags>
         Save transcript to: evals/transcripts/eval-{id}-run-{n}.md
-    Write evals/transcripts-to-grade.json: list of {eval_id, expectations, transcript_path, output_path}
+    Write evals/transcripts-to-grade.json: one entry per (eval_id, run) combination.
+      Total entries = total_evals × runs_per_eval.
+      Schema per entry: {eval_id, run_n, expectations, transcript_path, output_path}
+      output_path = "evals/transcripts/eval-{id}-run-{n}-grading.json"
+    Claude dispatches ONE grader agent per entry in transcripts-to-grade.json.
+    Each grader reads one transcript and writes one grading.json at output_path.
 
   Write trigger results to evals/trigger-results.json (survives between process invocations):
   ```json
@@ -249,9 +259,10 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
 
   Claude (main session) Step 2b — grader dispatch:
     Read evals/transcripts-to-grade.json
-    For each entry: dispatch grader agent with {eval_id, expectations, transcript_path, output_path}
+    For each entry: dispatch grader agent with {eval_id, run_n, expectations, transcript_path, output_path}
       using the Agent tool in FOREGROUND mode (synchronous — waits for each agent to complete
       before proceeding, or dispatches all in parallel and waits for all to return).
+    Total agents dispatched = total_evals × runs_per_eval (one per transcripts-to-grade.json entry).
     All graders have completed when all Agent tool calls have returned successfully.
     Claude then calls python run_evals.py --score.
 
@@ -295,9 +306,12 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
   Behavior difference from plain `--score`:
     - Passes previous_best = 0 to score.py (ignores history.best_score)
     - score.py runs normally and returns {combined, delta, is_improvement}
-    - run_evals.py then OVERRIDES delta and is_improvement before writing last-run.json:
-        delta = 0.0, is_improvement = false (baseline has no prior score to beat)
-    - Writes combined_score to BOTH history.baseline_score AND history.best_score in perfect-plugin.json
+    - run_evals.py constructs last-run.json from score.py output, then OVERRIDES two fields:
+        last-run.json.delta = 0.0
+        last-run.json.is_improvement = false
+      (combined_score in last-run.json = score.py's combined value, unchanged)
+    - After writing last-run.json: writes score.py's combined value to BOTH
+      history.baseline_score AND history.best_score in perfect-plugin.json
   Cannot be combined with --generate-transcripts.
 ```
 
