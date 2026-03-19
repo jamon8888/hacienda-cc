@@ -250,15 +250,27 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
   Claude (main session) Step 2b — grader dispatch:
     Read evals/transcripts-to-grade.json
     For each entry: dispatch grader agent with {eval_id, expectations, transcript_path, output_path}
-    Wait for all graders to complete (all grading.json files exist)
+      using the Agent tool in FOREGROUND mode (synchronous — waits for each agent to complete
+      before proceeding, or dispatches all in parallel and waits for all to return).
+    All graders have completed when all Agent tool calls have returned successfully.
+    Claude then calls python run_evals.py --score.
 
   run_evals.py Step 3 — score computation (called again by Claude after graders complete):
     Re-read evals/transcripts-to-grade.json to get the list of output_path values
-    Re-read evals/trigger-results.json to get trigger query results
+    Re-read evals/trigger-results.json → get per-query pass_rate_q values and total_queries
+    Compute trigger detail from trigger-results.json (NOT from score.py output):
+      trigger_detail.passed = count(queries where pass_rate_q >= 0.5)
+      trigger_detail.failed = total_queries - trigger_detail.passed
+      trigger_detail.total = total_queries
+      trigger_detail.failures = [query strings where pass_rate_q < 0.5]
+      trigger_score = trigger_detail.passed / trigger_detail.total × 100
     For each eval: read grading.json at the output_path listed in transcripts-to-grade.json
     Compute per-eval median: median(grading.summary.pass_rate across all N runs for that eval)
     functional_score = average(per-eval medians) × 100
     (i.e., average the per-eval medians across all evals, not a flat average across all runs)
+    Compute functional detail from per-eval medians:
+      passed_evals = count(evals where per-eval median >= 0.5)  ← fixed threshold, not configurable
+      failed_evals = total_evals - passed_evals
     Call score.py (step 3 below)
 
 3. Call score.py (subprocess):
@@ -475,7 +487,10 @@ Executes the 8-phase loop from `optimize-loop.md`. Stops when `combined_score >=
 abort with: "Run `/perfect-plugin:collect` first to generate evals before converting." Do not proceed.
 
 1. Runs `run_evals.py --generate-transcripts` → Claude dispatches graders → `run_evals.py --score`
-   on the existing CC plugin → stores combined_score result as `convert.original_score` in state file
+   on the existing CC plugin → stores combined_score result as `convert.original_score` in state file.
+   `previous_best` for score.py = history.best_score ?? 0 (same null-coercion as all other invocations).
+   The delta/is_improvement fields in last-run.json from this step are informational only;
+   the convert command reads combined_score directly for the comparison in step 4.
 2. Dispatches `cowork-converter` agent → applies conversion checklist in-place
 3. Runs `validate_plugin.py` on converted result.
    **If validate_plugin.py fails:** abort with error message: "Converted plugin failed validation.
@@ -542,8 +557,11 @@ Read ALL plugin files (SKILL.md, agents/, references/).
 
 **Phase 4 — Commit:**
 ```bash
+# Stage first, then check for diff, then validate the staged state, then commit.
+# validate_plugin.py scans the filesystem (not the git index), so staging first
+# ensures it sees the same state that will be committed.
 git add skills/ agents/ references/ .claude-plugin/ hooks/ commands/   # all plugin dirs; NEVER git add -A
-git diff --cached --quiet             # if exit 0: no-op, log status=no-op and skip to Phase 1
+git diff --cached --quiet             # if exit 0: no-op (nothing new staged), log status=no-op and skip to Phase 1
 python validate_plugin.py ./          # if fails: revert staged (git checkout -- .), log status=validation-failed, skip to Phase 1
 git commit -m "experiment(skill): <one-sentence description>"
 # if git commit fails due to a pre-existing git pre-commit hook in the repo
@@ -587,9 +605,13 @@ is_improvement = true (from run_evals.py output JSON field "is_improvement", set
   increment loop.current_iteration
 
 is_improvement = false → DISCARD
-  git revert HEAD --no-edit
-  if git revert conflicts: git revert --abort && git reset --hard HEAD~1
-  increment loop.current_iteration
+  git revert HEAD --no-edit    ← clean path: creates a revert commit, experiment preserved in history
+  if git revert conflicts:
+    git revert --abort         ← cancels in-progress revert, HEAD still points to experiment commit
+    git reset --hard HEAD~1    ← moves HEAD back to pre-experiment commit, discards experiment commit
+    (after this path: repo is at pre-experiment commit; history.best_commit is unaffected
+     since it pointed to an earlier good commit, not to the discarded experiment)
+  loop.current_iteration += 1 (both paths)
 
 crashed (run_evals.py failed, OOM, timeout) → fix if fixable (max 3 tries), else treat as DISCARD
   increment loop.current_iteration
