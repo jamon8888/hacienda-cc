@@ -477,7 +477,10 @@ abort with: "Run `/perfect-plugin:collect` first to generate evals before conver
 1. Runs `run_evals.py --generate-transcripts` → Claude dispatches graders → `run_evals.py --score`
    on the existing CC plugin → stores combined_score result as `convert.original_score` in state file
 2. Dispatches `cowork-converter` agent → applies conversion checklist in-place
-3. Runs `validate_plugin.py` on converted result
+3. Runs `validate_plugin.py` on converted result.
+   **If validate_plugin.py fails:** abort with error message: "Converted plugin failed validation.
+   Files have been modified in-place — review changes with `git diff` and fix manually,
+   or run `git checkout -- .` to discard all conversion changes." Do NOT auto-revert.
 4. Runs `run_evals.py --generate-transcripts` → Claude dispatches graders → `run_evals.py --score` → compares to `convert.original_score`
 5. **If score dropped ≤ 5 points:** report success. Print conversion summary table.
 6. **If score dropped > 5 points:** print per-component report (format below). Do NOT auto-revert. This is advisory — the developer decides whether to accept the result or run `/perfect-plugin:optimize` to recover the lost score.
@@ -539,7 +542,7 @@ Read ALL plugin files (SKILL.md, agents/, references/).
 
 **Phase 4 — Commit:**
 ```bash
-git add skills/ agents/ references/   # explicit paths — NEVER git add -A
+git add skills/ agents/ references/ .claude-plugin/ hooks/ commands/   # all plugin dirs; NEVER git add -A
 git diff --cached --quiet             # if exit 0: no-op, log status=no-op and skip to Phase 1
 python validate_plugin.py ./          # if fails: revert staged (git checkout -- .), log status=validation-failed, skip to Phase 1
 git commit -m "experiment(skill): <one-sentence description>"
@@ -737,7 +740,7 @@ Logic: `combined = t×0.4 + f×0.6`. `delta = combined - previous_best`. `is_imp
 1. `/collect` → `/build` → `/optimize` (Iterations: 10) produces a git-tracked plugin with a TSV log showing score progression. **Measurable:** `git log` shows baseline + experiment commits; `wc -l perfect-plugin-results.tsv` ≥ 2; TSV has ≥1 row with `status=keep`.
 2. Optimize loop runs without `AskUserQuestion` in phases 1–8. **Measurable:** grep for `AskUserQuestion` in loop output = 0 matches.
 3. Converted CC plugin passes `validate_plugin.py` and scores within 5 points of `convert.original_score`. **Measurable:** `|post_convert_score - convert.original_score| ≤ 5`.
-4. Every phase produces exactly one TSV row. **Measurable:** `wc -l perfect-plugin-results.tsv` = 1 (baseline) + `loop.current_iteration` (keep/discard/crash) + count(validation-failed rows) + count(no-op rows). Note: `validation-failed` and `no-op` each produce a TSV row but do NOT increment `loop.current_iteration`.
+4. Every phase produces exactly one TSV row. **Measurable:** `wc -l perfect-plugin-results.tsv` = 1 (baseline) + `loop.current_iteration` (keep/discard/crash) + count(validation-failed rows) + count(no-op rows) + count(hook-blocked rows). Note: `validation-failed`, `no-op`, and `hook-blocked` each produce a TSV row but do NOT increment `loop.current_iteration`.
 
 ---
 
