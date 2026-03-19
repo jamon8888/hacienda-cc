@@ -175,10 +175,7 @@ Bad expectations: "Output looks reasonable", "Claude used the skill", "Output is
 ```
 1. Read perfect-plugin.json → get eval paths, runs_per_eval, plugin_path, scoring config
    Read history.best_score from perfect-plugin.json → this is previous_best for score.py
-   (On --baseline flag: previous_best = 0. score.py is still called normally.
-    After score.py returns combined_score: write combined_score to BOTH
-    history.baseline_score AND history.best_score in perfect-plugin.json.
-    The is_improvement value returned by score.py is ignored on --baseline runs.)
+   Null-coercion: if history.best_score is null (state file freshly created), treat previous_best = 0
 
 2. Run trigger and functional branches IN PARALLEL (two subprocesses)
 
@@ -240,6 +237,11 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
   ```
   Exit (both files written; Claude will dispatch graders then call --score)
 
+  Idempotency: `--generate-transcripts` always overwrites existing transcripts and re-writes
+  both evals/transcripts-to-grade.json and evals/trigger-results.json. This makes it safe to
+  re-run on crash recovery (crash between --generate-transcripts and --score → simply re-run
+  --generate-transcripts, re-dispatch graders, then --score).
+
   Claude (main session) Step 2b — grader dispatch:
     Read evals/transcripts-to-grade.json
     For each entry: dispatch grader agent with {eval_id, expectations, transcript_path, output_path}
@@ -261,13 +263,23 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
 
 4. Output JSON written to evals/last-run.json (schema below)
 
-**run_evals.py supports two modes:**
+**run_evals.py supports two modes plus one modifier:**
 - `--generate-transcripts`: runs claude -p for trigger queries + eval prompts, writes
-  evals/transcripts-to-grade.json. Each entry includes the exact `output_path` where
-  the grader MUST write its grading.json. This `output_path` is the canonical write
-  destination and overrides any path convention from the source grader.md.
-- `--score`: reads grading.json files (paths from evals/transcripts-to-grade.json output_path fields),
-  calls score.py via subprocess (stdin JSON → stdout JSON), outputs evals/last-run.json
+  evals/transcripts-to-grade.json and evals/trigger-results.json. Each entry in
+  transcripts-to-grade.json includes the exact `output_path` where the grader MUST write
+  its grading.json. This `output_path` is the canonical write destination and overrides
+  any path convention from the source grader.md. Exits after writing both files.
+- `--score`: reads grading.json files (paths from evals/transcripts-to-grade.json output_path
+  fields) and evals/trigger-results.json, calls score.py via subprocess (stdin JSON → stdout
+  JSON), outputs evals/last-run.json.
+- `--baseline` (modifier for `--score` only): used as `python run_evals.py --score --baseline`.
+  Behavior difference from plain `--score`:
+    - Passes previous_best = 0 to score.py (ignores history.best_score)
+    - After score.py returns combined_score: writes combined_score to BOTH
+      history.baseline_score AND history.best_score in perfect-plugin.json
+    - Writes evals/last-run.json with delta = 0.0, is_improvement = false
+      (since it is the baseline, there is no prior score to beat)
+  Cannot be combined with --generate-transcripts.
 ```
 
 ### `run_evals.py` Output Schema
@@ -290,6 +302,7 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
     "passed_evals": 3,
     "failed_evals": 1,
     "total_evals": 4,
+    "pass_threshold": 0.5,
     "per_eval": [
       { "id": "eval-001", "median_pass_rate": 0.83 }
     ],
@@ -440,8 +453,9 @@ Reads `perfect-plugin.json` if it exists (resume mid-pipeline). Otherwise runs c
    **`evals/`** — the files already written by `:collect` (trigger-eval.json + evals.json). No additional content generated here.
 
    Additional components (agents, references, hooks) only if a use case explicitly requires a multi-step workflow, external tool, or event-driven behavior.
-4. Runs `validate_plugin.py` — structural gate. Fails fast.
-5. Runs `run_evals.py` — establishes baseline. Writes `history.baseline_score` and `history.best_score` to state file.
+4. Runs `validate_plugin.py` — structural gate. Fails fast with error if validation fails; no TSV created.
+5. Runs `run_evals.py --generate-transcripts` → Claude dispatches graders → `run_evals.py --score --baseline`.
+   Writes `history.baseline_score` and `history.best_score` to state file.
 6. Initializes `perfect-plugin-results.tsv` with baseline row.
 
 ### `/perfect-plugin:optimize`
@@ -450,7 +464,11 @@ Executes the 8-phase loop from `optimize-loop.md`. Stops when `combined_score >=
 
 ### `/perfect-plugin:convert`
 
-1. Runs `run_evals.py` on the existing CC plugin → stores result as `convert.original_score` in state file
+**Precondition:** `evals/trigger-eval.json` and `evals/evals.json` must exist. If either is missing,
+abort with: "Run `/perfect-plugin:collect` first to generate evals before converting." Do not proceed.
+
+1. Runs `run_evals.py --generate-transcripts` → Claude dispatches graders → `run_evals.py --score`
+   on the existing CC plugin → stores combined_score result as `convert.original_score` in state file
 2. Dispatches `cowork-converter` agent → applies conversion checklist in-place
 3. Runs `validate_plugin.py` on converted result
 4. Runs `run_evals.py` again → compares to `convert.original_score`
@@ -481,10 +499,12 @@ Full protocol in `references/optimize-loop.md`. Summary with all decisions resol
 
 **Phase 0 — Preconditions:**
 ```bash
-git rev-parse --git-dir          # fail fast if not a git repo
-git status --porcelain           # fail if dirty working tree (uncommitted user work)
-python validate_plugin.py ./     # structural gate
-python run_evals.py              # establish baseline; write history.baseline_score + best_score
+git rev-parse --git-dir                        # fail fast if not a git repo
+git status --porcelain                         # fail if dirty working tree (uncommitted user work)
+python validate_plugin.py ./                   # structural gate
+python run_evals.py --generate-transcripts     # trigger + transcript generation
+# Claude dispatches grader agents for each entry in evals/transcripts-to-grade.json
+python run_evals.py --score --baseline         # establish baseline; write history.baseline_score + best_score
 ```
 Writes baseline row to TSV. Sets `loop.status = "running"` in state file.
 
@@ -527,7 +547,7 @@ git commit -m "experiment(skill): <one-sentence description>"
 ```bash
 python run_evals.py --generate-transcripts   # trigger queries + eval transcript generation
 # Claude then dispatches grader agents for each entry in evals/transcripts-to-grade.json
-python run_evals.py --score                  # reads grading.json files, calls score.py
+python run_evals.py --score                  # reads grading.json + trigger-results.json, calls score.py
 ```
 Output JSON written to `evals/last-run.json`.
 
@@ -563,6 +583,11 @@ crashed (run_evals.py failed, OOM, timeout) → fix if fixable (max 3 tries), el
   increment loop.current_iteration
 
 (validation-failed and no-op are handled in Phase 4 — do NOT increment current_iteration for these)
+
+no-op infinite loop prevention: if 3 consecutive no-op rows appear in the TSV, treat the next
+iteration as a forced crash (log status=crash, increment current_iteration) and apply Phase 2
+rule 6 (radical change) at the next Phase 2. This escapes agent stuck states where every
+proposed change produces no diff.
 ```
 
 **Phase 7 — Log:**
@@ -594,6 +619,10 @@ trigger_score = (queries where pass_rate_q >= 0.5) / total_queries × 100
 Per functional eval:
   pass_rate_e = median(grading.summary.pass_rate across all runs)
 functional_score = average(pass_rate_e for all evals) × 100
+
+For last-run.json summary fields: an eval counts as "passed" if pass_rate_e >= 0.5, "failed" otherwise.
+(This threshold applies only to the passed_evals/failed_evals summary counters — it does not affect
+the functional_score calculation, which uses the continuous average of medians.)
 
 combined_score = (trigger_score × 0.4) + (functional_score × 0.6)
 ```
