@@ -49,13 +49,13 @@ perfect-plugin/
 ├── skills/
 │   └── perfect-plugin/
 │       ├── SKILL.md                       ← env detection + command routing
-│       ├── references/
-│       │   ├── collect-workflow.md        ← NL → eval generation dialogue protocol
-│       │   ├── build-workflow.md          ← evals → plugin scaffold spec
-│       │   ├── optimize-loop.md           ← 8-phase loop (adapted from autoresearch)
-│       │   ├── convert-workflow.md        ← CC → Cowork adaptation checklist
-│       │   ├── scoring.md                 ← combined score formula + noise handling
-│       │   └── state-schema.md            ← perfect-plugin.json full field spec
+│       ├── references/                    ← 6 files total:
+│       │   ├── collect-workflow.md        ← (1) NL → eval generation dialogue protocol
+│       │   ├── build-workflow.md          ← (2) evals → plugin scaffold spec
+│       │   ├── optimize-loop.md           ← (3) 8-phase loop (adapted from autoresearch)
+│       │   ├── convert-workflow.md        ← (4) CC → Cowork adaptation checklist
+│       │   ├── scoring.md                 ← (5) combined score formula + noise handling
+│       │   └── state-schema.md            ← (6) perfect-plugin.json full field spec
 │       ├── agents/
 │       │   ├── eval-generator.md          ← NEW: NL use cases → eval files
 │       │   ├── grader.md                  ← TRIMMED from plugin-forge (schema below)
@@ -173,31 +173,49 @@ Bad expectations: "Output looks reasonable", "Claude used the skill", "Output is
 `run_evals.py` is the central orchestrator. Full flow:
 
 ```
-1. Read perfect-plugin.json → get eval paths, runs_per_eval, plugin_path
-2. Run trigger evals and functional eval execution IN PARALLEL (two subprocesses)
+1. Read perfect-plugin.json → get eval paths, runs_per_eval, plugin_path, scoring config
+   Read history.best_score from perfect-plugin.json → this is previous_best for score.py
+   (On --baseline flag: previous_best = 0, is_improvement check is skipped)
 
-TRIGGER BRANCH:
+2. Run trigger and functional branches IN PARALLEL (two subprocesses)
+
+TRIGGER BRANCH — how trigger detection works:
   For each run in 1..runs_per_eval:
     For each entry in trigger-eval.json:
-      claude -p "<query>" --plugin <plugin_path>
-      Record: did the skill trigger? (yes/no)
-  Compute per-query pass rate across runs → median
-  trigger_score = (queries where median pass_rate >= 0.5) / total × 100
+      Run: claude -p "<query>" --plugin <plugin_path>
+      Capture full stdout transcript
+      Detect trigger: search transcript for the pattern "Using [skill-name] to"
+        (this is the standard superpowers skill invocation announcement)
+        If found → triggered = true
+        If not found → triggered = false
+      did_trigger_correctly = (triggered == entry.should_trigger)
+  Per query: compute pass_rate = count(did_trigger_correctly) / runs_per_eval
+  trigger_score = (queries where pass_rate >= 0.5) / total_queries × 100
 
-FUNCTIONAL BRANCH:
+FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
+  input_files in evals.json are passed as --context flags to provide INPUT context
+  to the eval prompt; they are not output artefacts. The grader reads the transcript only.
+
   For each run in 1..runs_per_eval:
     For each eval in evals.json:
-      claude -p "<prompt>" --plugin <plugin_path> [--context <input_files>]
+      context_flags = ["--context " + f for f in eval.input_files]  # may be empty
+      Run: claude -p "<eval.prompt>" --plugin <plugin_path> <context_flags>
       Save transcript to: evals/transcripts/eval-{id}-run-{n}.md
       Dispatch grader agent:
-        Input: eval.id, eval.expectations, transcript path = evals/transcripts/eval-{id}-run-{n}.md
-        Output written by grader to: evals/transcripts/eval-{id}-run-{n}-grading.json
-  For each eval:
-    Collect pass_rate from all grading.json files for that eval
-    Compute median pass_rate across runs
+        Input: {eval_id: eval.id,
+                expectations: eval.expectations,
+                transcript_path: "evals/transcripts/eval-{id}-run-{n}.md",
+                output_path: "evals/transcripts/eval-{id}-run-{n}-grading.json"}
+        Grader reads the transcript and grades each expectation against it.
+        Grader writes output to: evals/transcripts/eval-{id}-run-{n}-grading.json
+  For each eval: collect pass_rate from all its grading.json files → compute median
   functional_score = average of per-eval median pass_rates × 100
 
-3. Call score.py with trigger_score, functional_score, previous best, weights, noise_floor
+3. Call score.py:
+   Input JSON: {trigger_score, functional_score, previous_best (from step 1),
+                weights: scoring.weights, noise_floor: scoring.noise_floor}
+   Receives output JSON: {combined, delta, is_improvement}
+
 4. Output JSON (schema below)
 ```
 
@@ -233,7 +251,9 @@ FUNCTIONAL BRANCH:
 
 ## `grading.json` Schema (grader agent output)
 
-Plugin-forge's `grader.md` is copied and trimmed to this schema only. Fields from the source (`execution_metrics`, `timing`, `claims`, `user_notes_summary`, `eval_feedback`) are removed. Output path: `evals/transcripts/eval-{id}-run-{n}-grading.json` (set by `run_evals.py` when dispatching the grader).
+Plugin-forge's `grader.md` is copied and trimmed. The source grader reads output files from an `outputs_dir` — this plugin removes that dependency because **evals are transcript-only**: `input_files` provide context to the eval prompt but the grader reads only the resulting transcript (not output artefacts). Fields removed from source: `execution_metrics`, `timing`, `claims`, `user_notes_summary`, `eval_feedback`, `outputs_dir`. The grader receives `transcript_path` and reads it directly.
+
+Output path: `evals/transcripts/eval-{id}-run-{n}-grading.json` (set by `run_evals.py` when dispatching).
 
 ```json
 {
@@ -244,7 +264,7 @@ Plugin-forge's `grader.md` is copied and trimmed to this schema only. Fields fro
     {
       "text": "Output contains exactly 3 sections",
       "passed": true,
-      "evidence": "Found: '## Summary ... ## Risks ... ## Recommendations'"
+      "evidence": "Found in transcript: '## Summary ... ## Risks ... ## Recommendations'"
     }
   ],
   "summary": {
@@ -307,16 +327,22 @@ File: `perfect-plugin-results.tsv` (gitignored, at plugin root)
 
 ```tsv
 # metric_direction: higher_is_better
-iteration	commit	trigger	functional	combined	delta	guard	status	description
+iteration	commit	trigger	functional	combined	delta	validate	status	description
 0	a1b2c3d	62.0	71.0	67.4	0.0	pass	baseline	initial state
 1	b2c3d4e	71.0	78.0	75.2	+7.8	pass	keep	add 4 trigger examples for edge case phrasing
 2	-	68.0	74.0	71.6	-3.6	-	discard	rewrite body as numbered steps (hurt trigger)
-3	-	-	-	-	-	-	crash	add MCP config (syntax error in plugin.json)
-4	-	-	-	-	-	-	no-op	attempted change produced no diff
-5	-	-	-	-	-	-	hook-blocked	validate_plugin rejected missing ${CLAUDE_PLUGIN_ROOT}
+3	-	-	-	-	-	fail	validation-failed	SKILL.md description exceeded 1024 chars
+4	-	-	-	-	-	-	crash	add MCP config (syntax error in plugin.json)
+5	-	-	-	-	-	-	no-op	attempted change produced no diff
+6	-	-	-	-	-	-	hook-blocked	git pre-commit hook rejected commit
 ```
 
-**Sentinel values:** For rows where no eval ran (`crash`, `no-op`, `hook-blocked`, `discard` where verify was skipped), all metric columns (`trigger`, `functional`, `combined`, `delta`) use `-`. The `guard` column uses `-` when no guard check ran.
+**Column definitions:**
+- `validate`: `pass` (validate_plugin.py passed), `fail` (validate_plugin.py failed), `-` (not run — crash or no-op before validation)
+- `status` values: `baseline`, `keep`, `discard`, `validation-failed` (validate_plugin failed before eval ran), `crash`, `no-op`, `hook-blocked` (git pre-commit hook rejected commit — distinct from validate_plugin failure)
+- Sentinel `-` in metric columns (`trigger`, `functional`, `combined`, `delta`): used when no eval ran
+
+**Distinction between `validation-failed` and `hook-blocked`:** `validation-failed` = `validate_plugin.py` returned non-zero before the git commit. `hook-blocked` = git pre-commit hook (not validate_plugin.py) rejected the commit. These are separate scenarios with separate status labels.
 
 ---
 
@@ -357,7 +383,7 @@ Executes the 8-phase loop from `optimize-loop.md`. Stops when `combined_score >=
 3. Runs `validate_plugin.py` on converted result
 4. Runs `run_evals.py` again → compares to `convert.original_score`
 5. **If score dropped ≤ 5 points:** report success. Print conversion summary table.
-6. **If score dropped > 5 points:** print per-component report (format below). Do NOT auto-revert.
+6. **If score dropped > 5 points:** print per-component report (format below). Do NOT auto-revert. This is advisory — the developer decides whether to accept the result or run `/perfect-plugin:optimize` to recover the lost score.
 
 **Per-component report format (on failure):**
 
@@ -415,9 +441,10 @@ Read ALL plugin files (SKILL.md, agents/, references/).
 **Phase 4 — Commit:**
 ```bash
 git add skills/ agents/ references/   # explicit paths — NEVER git add -A
-git diff --cached --quiet             # if exit 0: no-op, log and skip to Phase 1
-python validate_plugin.py ./          # guard: if fails, revert staged, log hook-blocked, skip to Phase 1
+git diff --cached --quiet             # if exit 0: no-op, log status=no-op and skip to Phase 1
+python validate_plugin.py ./          # if fails: revert staged (git checkout -- .), log status=validation-failed, skip to Phase 1
 git commit -m "experiment(skill): <one-sentence description>"
+# if git pre-commit hook rejects commit: log status=hook-blocked, skip to Phase 1
 ```
 
 **Phase 5 — Verify:**
@@ -426,9 +453,9 @@ python run_evals.py   # trigger + functional in parallel (see Execution Path abo
 ```
 Output JSON written to `evals/last-run.json`.
 
-**Phase 5.1 — Analyzer (only on Phase 6 keep decisions):**
+**Phase 5.1 — Analyzer (runs immediately after Phase 5 verify, only when is_improvement=true):**
 
-Dispatch `analyzer` agent with this exact prompt structure:
+Before the keep/discard decision in Phase 6, if `is_improvement = true`: dispatch `analyzer` agent:
 ```
 Analyze why this iteration improved the score.
 
@@ -440,24 +467,24 @@ Write a 2–4 sentence insight explaining what specifically caused the score imp
 Output ONLY the insight text. No headers. No JSON.
 ```
 
-Agent writes its output to `evals/analyzer-insight.md` (plain text, overwritten each iteration). Phase 1 of the next iteration reads this file.
+Agent writes its output to `evals/analyzer-insight.md` (plain text, overwritten each time). Phase 1 of the next iteration reads this file. The analyzer does not run on discard, crash, no-op, or validation-failed outcomes.
 
 **Phase 6 — Decide:**
 ```
-is_improvement = true AND validate_plugin passes → KEEP
-  write history.best_score = combined
-  write history.best_commit = git rev-parse --short HEAD
-  update loop.current_iteration + 1
-  dispatch analyzer (Phase 5.1)
-
-is_improvement = true AND validate_plugin fails → rework (max 2 attempts)
-  if still failing after 2: treat as DISCARD
+is_improvement = true (Phase 4 commit succeeded) → KEEP
+  write history.best_score = combined_score to state file
+  write history.best_commit = git rev-parse --short HEAD to state file
+  increment loop.current_iteration
 
 is_improvement = false → DISCARD
   git revert HEAD --no-edit
   if git revert conflicts: git revert --abort && git reset --hard HEAD~1
+  increment loop.current_iteration
 
-crashed → fix if fixable (max 3 tries), else DISCARD
+crashed (run_evals.py failed, OOM, timeout) → fix if fixable (max 3 tries), else treat as DISCARD
+  increment loop.current_iteration
+
+(validation-failed and no-op are handled in Phase 4 — do NOT increment current_iteration for these)
 ```
 
 **Phase 7 — Log:**
