@@ -1,13 +1,13 @@
 # perfect-plugin — Design Spec
 
 **Date:** 2026-03-19
-**Status:** Approved (v2 — post spec-review)
+**Status:** Approved (v3 — post second spec-review)
 
 ---
 
 ## Problem
 
-Plugin developers building for Claude Cowork have no automated path from "here is what I want this plugin to do" to "here is a plugin that reliably does it." They write skills by intuition, have no benchmark to measure quality, and no feedback loop to improve trigger precision or functional correctness over time. Existing tools (plugin-forge, autoresearch) solve adjacent pieces but are not wired together.
+Plugin developers building for Claude Cowork have no automated path from "here is what I want this plugin to do" to "here is a plugin that reliably does it." They write skills by intuition, have no benchmark to measure quality, and no feedback loop to improve trigger precision or functional correctness. Existing tools (plugin-forge, autoresearch) solve adjacent pieces but are not wired together.
 
 ---
 
@@ -16,29 +16,27 @@ Plugin developers building for Claude Cowork have no automated path from "here i
 A distributable Claude Code plugin — `perfect-plugin` — that:
 
 1. Converts natural-language use cases into structured evals (the benchmark)
-2. Scaffolds an initial plugin from those evals
-3. Runs an autonomous iteration loop that improves the whole plugin (SKILL.md body, description, agents, references) against the combined eval score until a quality threshold or iteration limit is reached
+2. Scaffolds an initial plugin skeleton from those evals
+3. Runs an autonomous iteration loop improving the plugin against a combined eval score until a threshold or iteration limit is reached
 4. Converts existing Claude Code plugins to Cowork-compatible versions with score verification
 
 ---
 
 ## Users
 
-Plugin developers who know what a SKILL.md is and want a rigorous, automated quality loop — not a hand-holding wizard. This is a power tool, not a beginner guide.
+Plugin developers who know what a SKILL.md is. Power tool, not a beginner guide.
 
 ---
 
-## Architecture
+## Architecture — Reuse vs Re-implement
 
-Three intellectual layers from existing codebases — clarifying exactly what is reused vs re-implemented:
-
-| Layer | Source | What is reused (verbatim copy → adapt) | What is re-implemented |
+| Layer | Source | What is reused | What is re-implemented |
 |---|---|---|---|
-| Orchestration | superpowers-main | `dispatching-parallel-agents` skill pattern for parallel eval runs; `subagent-driven-development` two-stage review pattern for `:build` scaffolding | Nothing — used as behavioral reference only |
-| Iteration engine | autoresearch-master | The 8-phase loop protocol, git-as-memory rules, TSV logging format, guard/noise/crash-recovery rules — all copied into `optimize-loop.md` as the authoritative reference | The loop is re-implemented inside `optimize-loop.md` with plugin-specific Phase 2 ideation heuristics. The autoresearch plugin is NOT called at runtime. |
-| Plugin craft | plugin-forge | `agents/grader.md` and `agents/analyzer.md` copied verbatim into `perfect-plugin/skills/perfect-plugin/agents/` and adapted (frontmatter updated, tool list adjusted). `scripts/quick_validate.py` logic replicated in `validate_plugin.py`. Eval file schemas, plugin.json schema, SKILL.md frontmatter rules all reused. | `eval-generator.md` and `cowork-converter.md` agents are new. `run_evals.py` and `score.py` are new scripts. |
+| Orchestration | superpowers-main | `dispatching-parallel-agents` pattern (behavioral reference only for parallel eval runs) | Nothing called at runtime |
+| Iteration engine | autoresearch-master | 8-phase protocol, git-as-memory rules, TSV format, guard/noise/crash-recovery rules — copied verbatim into `optimize-loop.md` as the reference | Loop re-implemented inside `optimize-loop.md` with plugin-specific Phase 2 heuristics. Autoresearch plugin NOT called at runtime. |
+| Plugin craft | plugin-forge | `grader.md` copied then trimmed to the schema defined below. `quick_validate.py` logic replicated in `validate_plugin.py` for rules 1–3. Eval file schemas and plugin.json schema reused. | `eval-generator.md`, `analyzer.md`, and `cowork-converter.md` are new agents (not adapted from plugin-forge — plugin-forge's analyzer is an A/B comparator with incompatible inputs). `run_evals.py`, `score.py`, `validate_plugin.py` rules 4–6 are new. |
 
-**At runtime:** `perfect-plugin` is a self-contained plugin. It does not call autoresearch or plugin-forge at runtime — it embeds the knowledge from both.
+**At runtime:** `perfect-plugin` is self-contained. It does not call autoresearch or plugin-forge at runtime.
 
 ---
 
@@ -50,23 +48,23 @@ perfect-plugin/
 │   └── plugin.json
 ├── skills/
 │   └── perfect-plugin/
-│       ├── SKILL.md                      ← env detection + command routing
+│       ├── SKILL.md                       ← env detection + command routing
 │       ├── references/
-│       │   ├── collect-workflow.md       ← NL → eval generation dialogue protocol
-│       │   ├── build-workflow.md         ← evals → plugin scaffold protocol
-│       │   ├── optimize-loop.md          ← 8-phase loop (adapted from autoresearch)
-│       │   ├── convert-workflow.md       ← CC → Cowork adaptation checklist
-│       │   ├── scoring.md                ← combined score formula + noise handling
-│       │   └── state-schema.md           ← perfect-plugin.json full field spec
+│       │   ├── collect-workflow.md        ← NL → eval generation dialogue protocol
+│       │   ├── build-workflow.md          ← evals → plugin scaffold spec
+│       │   ├── optimize-loop.md           ← 8-phase loop (adapted from autoresearch)
+│       │   ├── convert-workflow.md        ← CC → Cowork adaptation checklist
+│       │   ├── scoring.md                 ← combined score formula + noise handling
+│       │   └── state-schema.md            ← perfect-plugin.json full field spec
 │       ├── agents/
-│       │   ├── eval-generator.md         ← NEW: NL use cases → eval files
-│       │   ├── grader.md                 ← ADAPTED from plugin-forge
-│       │   ├── analyzer.md               ← ADAPTED from plugin-forge
-│       │   └── cowork-converter.md       ← NEW: CC → Cowork adaptation
+│       │   ├── eval-generator.md          ← NEW: NL use cases → eval files
+│       │   ├── grader.md                  ← TRIMMED from plugin-forge (schema below)
+│       │   ├── analyzer.md                ← NEW: git diff + TSV rows → insight file
+│       │   └── cowork-converter.md        ← NEW: CC → Cowork adaptation
 │       └── scripts/
-│           ├── run_evals.py              ← NEW: orchestrates eval execution
-│           ├── score.py                  ← NEW: weighted score + noise check
-│           └── validate_plugin.py        ← ADAPTED from plugin-forge quick_validate.py
+│           ├── run_evals.py               ← NEW: orchestrates all eval execution
+│           ├── score.py                   ← NEW: weighted score + noise check
+│           └── validate_plugin.py         ← PARTIAL: rules 1–3 from plugin-forge quick_validate.py; rules 4–6 new
 ├── commands/
 │   ├── perfect-plugin.md
 │   └── perfect-plugin/
@@ -81,7 +79,7 @@ perfect-plugin/
 
 ## State File: `perfect-plugin.json`
 
-Lives at the root of the **target plugin** directory (the plugin being built/optimized, not perfect-plugin itself). All relative paths resolve from this directory. Persists across session interruptions.
+Lives at the root of the **target plugin** directory. All relative paths resolve from `plugin_path`. Persists across session interruptions.
 
 ```json
 {
@@ -118,11 +116,12 @@ Lives at the root of the **target plugin** directory (the plugin being built/opt
 }
 ```
 
-**Notes:**
-- `platform` is `"cowork"` or `"claude-code"` only. Multi-platform is out of scope.
-- `convert.original_score` stores the pre-conversion combined score, used by `:convert` to verify the 5-point acceptance criterion.
-- `loop.status = "crashed"` records that the last run terminated abnormally, enabling deterministic resumption.
-- All paths in `evals.trigger_path` and `evals.functional_path` are relative to `plugin_path`.
+**Field notes:**
+- `platform`: `"cowork"` or `"claude-code"` only. Multi-platform out of scope.
+- `loop.status = "crashed"`: set when the last run terminated abnormally, enabling deterministic resumption.
+- `history.best_commit`: written at Phase 6 whenever a new best score is achieved (`git rev-parse --short HEAD`). Read during crash recovery to restore best known state.
+- `convert.original_score`: stores pre-conversion combined score for the 5-point acceptance criterion.
+- `use_cases[].id`: human-traceability only. Not consumed by scripts or agents.
 
 ---
 
@@ -137,7 +136,7 @@ Lives at the root of the **target plugin** directory (the plugin being built/opt
     "should_trigger": true
   },
   {
-    "query": "string — adjacent query, genuinely ambiguous about whether skill applies",
+    "query": "string — adjacent, genuinely ambiguous query",
     "should_trigger": false
   }
 ]
@@ -152,10 +151,10 @@ Rules: 10–20 entries total. 60% `should_trigger: true`, 40% false. No triviall
   {
     "id": "eval-001",
     "use_case_id": "uc-001",
-    "prompt": "string — the exact prompt to run against the skill",
-    "input_files": ["optional/path/to/sample.txt"],
+    "prompt": "string — exact prompt to run against the skill",
+    "input_files": ["optional/relative/path/to/sample.txt"],
     "expectations": [
-      "string — verifiable assertion (structural, content-presence, accuracy, or process)"
+      "string — verifiable assertion (structural, content-presence, accuracy)"
     ],
     "notes": "string — optional context for the grader"
   }
@@ -165,36 +164,76 @@ Rules: 10–20 entries total. 60% `should_trigger: true`, 40% false. No triviall
 Good expectations: "Output contains exactly 3 sections: Summary, Risks, Recommendations."
 Bad expectations: "Output looks reasonable", "Claude used the skill", "Output is helpful."
 
+`input_files`: paths relative to `plugin_path`. `run_evals.py` passes these as context to the `claude -p` invocation for the eval prompt.
+
 ---
 
-## `run_evals.py` Output Schema
+## `run_evals.py` — Full Execution Path
+
+`run_evals.py` is the central orchestrator. Full flow:
+
+```
+1. Read perfect-plugin.json → get eval paths, runs_per_eval, plugin_path
+2. Run trigger evals and functional eval execution IN PARALLEL (two subprocesses)
+
+TRIGGER BRANCH:
+  For each run in 1..runs_per_eval:
+    For each entry in trigger-eval.json:
+      claude -p "<query>" --plugin <plugin_path>
+      Record: did the skill trigger? (yes/no)
+  Compute per-query pass rate across runs → median
+  trigger_score = (queries where median pass_rate >= 0.5) / total × 100
+
+FUNCTIONAL BRANCH:
+  For each run in 1..runs_per_eval:
+    For each eval in evals.json:
+      claude -p "<prompt>" --plugin <plugin_path> [--context <input_files>]
+      Save transcript to: evals/transcripts/eval-{id}-run-{n}.md
+      Dispatch grader agent:
+        Input: eval.id, eval.expectations, transcript path = evals/transcripts/eval-{id}-run-{n}.md
+        Output written by grader to: evals/transcripts/eval-{id}-run-{n}-grading.json
+  For each eval:
+    Collect pass_rate from all grading.json files for that eval
+    Compute median pass_rate across runs
+  functional_score = average of per-eval median pass_rates × 100
+
+3. Call score.py with trigger_score, functional_score, previous best, weights, noise_floor
+4. Output JSON (schema below)
+```
+
+### `run_evals.py` Output Schema
 
 ```json
 {
   "trigger_score": 74.0,
   "functional_score": 81.0,
   "combined_score": 78.2,
+  "delta": 7.8,
+  "is_improvement": true,
   "runs": 3,
   "trigger_detail": {
     "passed": 11,
     "failed": 4,
     "total": 15,
-    "failures": ["query text that failed"]
+    "failures": ["exact query strings that failed"]
   },
   "functional_detail": {
-    "passed": 13,
-    "failed": 3,
-    "total": 16,
-    "grading_path": "evals/grading.json"
+    "passed_evals": 3,
+    "failed_evals": 1,
+    "total_evals": 4,
+    "per_eval": [
+      { "id": "eval-001", "median_pass_rate": 0.83 }
+    ],
+    "grading_paths": ["evals/transcripts/eval-001-run-1-grading.json"]
   }
 }
 ```
 
-`run_evals.py` orchestrates: it runs trigger queries via `claude -p`, collects results, then dispatches the `grader` agent for functional evals. It reads `grading.json` to count passes/failures. Score computation is delegated to `score.py`.
-
 ---
 
-## `grading.json` Schema (output of `grader` agent)
+## `grading.json` Schema (grader agent output)
+
+Plugin-forge's `grader.md` is copied and trimmed to this schema only. Fields from the source (`execution_metrics`, `timing`, `claims`, `user_notes_summary`, `eval_feedback`) are removed. Output path: `evals/transcripts/eval-{id}-run-{n}-grading.json` (set by `run_evals.py` when dispatching the grader).
 
 ```json
 {
@@ -203,9 +242,9 @@ Bad expectations: "Output looks reasonable", "Claude used the skill", "Output is
   "transcript_path": "evals/transcripts/eval-001-run-1.md",
   "expectations": [
     {
-      "text": "Output contains exactly 3 sections: Summary, Risks, Recommendations",
+      "text": "Output contains exactly 3 sections",
       "passed": true,
-      "evidence": "Found in transcript: '## Summary ... ## Risks ... ## Recommendations'"
+      "evidence": "Found: '## Summary ... ## Risks ... ## Recommendations'"
     }
   ],
   "summary": {
@@ -217,26 +256,54 @@ Bad expectations: "Output looks reasonable", "Claude used the skill", "Output is
 }
 ```
 
-`run_evals.py` reads all `grading.json` files (one per eval run) and aggregates `pass_rate` values to compute `functional_score`.
+---
+
+## `score.py`
+
+Input (passed as arguments or stdin JSON):
+```json
+{
+  "trigger_score": 74.0,
+  "functional_score": 81.0,
+  "previous_best": 67.4,
+  "weights": { "trigger": 0.4, "functional": 0.6 },
+  "noise_floor": 2.0
+}
+```
+
+Output:
+```json
+{
+  "combined": 78.2,
+  "delta": 10.8,
+  "is_improvement": true
+}
+```
+
+Formula: `combined = (trigger × 0.4) + (functional × 0.6)`. `delta = combined - previous_best`. `is_improvement = delta > noise_floor`.
 
 ---
 
-## `validate_plugin.py` Validation Rules
+## `validate_plugin.py` — Rules and Scan Scope
 
-Exits non-zero if any rule fails:
+Exits non-zero on any failure. Prints the failing rule name and the offending file/value.
 
-1. `.claude-plugin/plugin.json` exists and contains `"name"` field (kebab-case)
-2. Every `skills/*/SKILL.md` file has frontmatter with `name:` matching its directory name
-3. Every `description:` field is under 1024 characters and contains no `<` or `>` characters
-4. Every agent `tools:` field is a JSON array (not a comma-separated string)
-5. No hardcoded absolute paths anywhere in plugin files (no `/Users/`, no `C:\`, no `/home/`)
-6. All plugin-relative paths use `${CLAUDE_PLUGIN_ROOT}`
+**Scan scope:** All files in the plugin directory tree with extensions `.md`, `.json`, `.yaml`, `.toml`. Does not scan binary files or `node_modules/`.
+
+| # | Rule | Source |
+|---|---|---|
+| 1 | `.claude-plugin/plugin.json` exists and has `"name"` field matching kebab-case pattern `^[a-z][a-z0-9-]*[a-z0-9]$` | From plugin-forge quick_validate.py |
+| 2 | Every `skills/*/SKILL.md` has frontmatter with `name:` matching its parent directory name | From plugin-forge quick_validate.py |
+| 3 | Every `description:` in frontmatter is under 1024 chars and contains no `<` or `>` | From plugin-forge quick_validate.py |
+| 4 | Every agent file's `tools:` frontmatter field is a YAML sequence (not a comma-separated string) | New |
+| 5 | No string matching `^/Users/`, `^C:\\`, `^/home/`, `^/root/` appears in any scanned file | New |
+| 6 | Any path string in `hooks/hooks.json` that references a plugin file uses `${CLAUDE_PLUGIN_ROOT}` — detected by scanning for absolute paths in the `command` fields of `hooks.json` | New |
 
 ---
 
 ## TSV Log Schema
 
-File: `perfect-plugin-results.tsv` (gitignored, lives at plugin root)
+File: `perfect-plugin-results.tsv` (gitignored, at plugin root)
 
 ```tsv
 # metric_direction: higher_is_better
@@ -245,9 +312,11 @@ iteration	commit	trigger	functional	combined	delta	guard	status	description
 1	b2c3d4e	71.0	78.0	75.2	+7.8	pass	keep	add 4 trigger examples for edge case phrasing
 2	-	68.0	74.0	71.6	-3.6	-	discard	rewrite body as numbered steps (hurt trigger)
 3	-	-	-	-	-	-	crash	add MCP config (syntax error in plugin.json)
+4	-	-	-	-	-	-	no-op	attempted change produced no diff
+5	-	-	-	-	-	-	hook-blocked	validate_plugin rejected missing ${CLAUDE_PLUGIN_ROOT}
 ```
 
-Columns: `iteration` (int), `commit` (short hash or `-`), `trigger` (float or `-`), `functional` (float or `-`), `combined` (float or `-`), `delta` (signed float or `-`), `guard` (`pass` | `fail` | `-`), `status` (`baseline` | `keep` | `discard` | `crash` | `no-op` | `hook-blocked`), `description` (string).
+**Sentinel values:** For rows where no eval ran (`crash`, `no-op`, `hook-blocked`, `discard` where verify was skipped), all metric columns (`trigger`, `functional`, `combined`, `delta`) use `-`. The `guard` column uses `-` when no guard check ran.
 
 ---
 
@@ -255,53 +324,71 @@ Columns: `iteration` (int), `commit` (short hash or `-`), `trigger` (float or `-
 
 ### `/perfect-plugin` — Master Orchestrator
 
-Runs: collect → build → optimize in sequence for new plugins. Reads `perfect-plugin.json` if it exists (resume mid-pipeline). Entry point for first-time use.
+Reads `perfect-plugin.json` if it exists (resume mid-pipeline). Otherwise runs collect → build → optimize in sequence. Entry point for first-time use.
 
 ### `/perfect-plugin:collect`
 
-1. Dialogue: captures NL use cases one at a time (open-ended description + expected behavior per case)
+1. Dialogue: captures NL use cases one at a time (description + expected_behavior per case)
 2. Dispatches `eval-generator` agent with the collected use cases
-3. Agent produces `evals/trigger-eval.json` and `evals/evals.json` conforming to schemas above
-4. Writes `perfect-plugin.json` with `use_cases` and `evals` fields populated
+3. Agent produces `evals/trigger-eval.json` + `evals/evals.json` conforming to schemas above
+4. Writes `perfect-plugin.json` with `use_cases` and `evals` fields. Creates file if missing.
 
-### `/perfect-plugin:build`
+### `/perfect-plugin:build` — Scaffold Spec
 
 1. Reads `perfect-plugin.json` — platform, use cases, evals
-2. Determines required components using YAGNI (only what use cases actually require)
-3. Scaffolds plugin using plugin-forge schemas (see Plugin Structure above)
-4. Runs `validate_plugin.py` — structural gate, fails fast if invalid
-5. Runs `run_evals.py --baseline` → writes `history.baseline_score` and `best_score` to state
-6. Initializes `perfect-plugin-results.tsv` with baseline row
+2. Determines required components (YAGNI: only what the use cases actually need)
+3. Produces a minimal skeleton:
+   - `.claude-plugin/plugin.json` with `name` derived from target directory name, version `0.1.0`
+   - `skills/<plugin-name>/SKILL.md` with frontmatter `name` + a draft `description` generated from the use cases
+   - `evals/` directory containing the files already written by `:collect`
+   - Additional components (agents, references, hooks) only if a use case explicitly requires them
+4. Runs `validate_plugin.py` — structural gate. Fails fast.
+5. Runs `run_evals.py` — establishes baseline. Writes `history.baseline_score` and `history.best_score` to state file.
+6. Initializes `perfect-plugin-results.tsv` with baseline row.
 
 ### `/perfect-plugin:optimize`
 
-Executes the 8-phase loop from `optimize-loop.md`. Reads stopping config from `perfect-plugin.json`. Stops when `combined_score >= scoring.threshold` OR `loop.current_iteration >= loop.max_iterations`, whichever first.
-
-Can be re-run after `:collect` adds new use cases.
+Executes the 8-phase loop from `optimize-loop.md`. Stops when `combined_score >= scoring.threshold` OR `loop.current_iteration >= loop.max_iterations`.
 
 ### `/perfect-plugin:convert`
 
-1. Reads the existing CC plugin
-2. Runs `run_evals.py` on current state → stores as `convert.original_score` in state file
-3. Dispatches `cowork-converter` agent to apply conversion checklist (see below)
-4. Runs `validate_plugin.py` on result
-5. Runs `run_evals.py` again → compares to `convert.original_score`
-6. If score dropped more than 5 points: reports per-component delta and which components need attention. Does NOT auto-revert — reports to developer.
-7. If score within 5 points: reports success
+1. Runs `run_evals.py` on the existing CC plugin → stores result as `convert.original_score` in state file
+2. Dispatches `cowork-converter` agent → applies conversion checklist in-place
+3. Runs `validate_plugin.py` on converted result
+4. Runs `run_evals.py` again → compares to `convert.original_score`
+5. **If score dropped ≤ 5 points:** report success. Print conversion summary table.
+6. **If score dropped > 5 points:** print per-component report (format below). Do NOT auto-revert.
+
+**Per-component report format (on failure):**
+
+```
+Conversion score drop: -8.3 points (original: 74.2, post-convert: 65.9)
+
+Component deltas:
+  trigger score:    62.0 → 58.0  (-4.0)  ← description may need Cowork-specific phrasing
+  functional score: 81.0 → 71.5  (-9.5)  ← likely caused by items below
+
+Unresolved checklist items (manual intervention needed):
+  ✗ Item 1: Found 3 claude -p calls in scripts/run.py lines 42, 67, 103 — could not determine replacement (inline eval vs static JSON)
+  ✗ Item 8: MCP server "my-browser-mcp" uses browser-only transport — no Cowork equivalent available
+
+Recommendation: address the unresolved items above and re-run /perfect-plugin:optimize (Iterations: 10).
+```
 
 ---
 
 ## Optimize Loop (8 Phases)
 
-Full protocol in `references/optimize-loop.md`. Summary:
+Full protocol in `references/optimize-loop.md`. Summary with all decisions resolved:
 
 **Phase 0 — Preconditions:**
 ```bash
 git rev-parse --git-dir          # fail fast if not a git repo
-git status --porcelain           # fail if dirty working tree
+git status --porcelain           # fail if dirty working tree (uncommitted user work)
 python validate_plugin.py ./     # structural gate
-python run_evals.py --baseline   # establish baseline, write to state + TSV
+python run_evals.py              # establish baseline; write history.baseline_score + best_score
 ```
+Writes baseline row to TSV. Sets `loop.status = "running"` in state file.
 
 **Phase 1 — Review (every iteration, mandatory):**
 ```bash
@@ -309,102 +396,113 @@ git log --oneline -20
 git diff HEAD~1
 tail -20 perfect-plugin-results.tsv
 cat perfect-plugin.json
+cat evals/analyzer-insight.md    # read if file exists (written by Phase 5.1 of previous iteration)
 ```
-Read ALL plugin files. Dispatcher also reads the `analyzer` agent's output from the previous iteration (if any) to inform ideation. See Phase 5.1 below for when analyzer runs.
+Read ALL plugin files (SKILL.md, agents/, references/).
 
 **Phase 2 — Ideate (priority order):**
 1. Fix crashes / validation failures
-2. Exploit successes (read `git diff HEAD~1`, try variants of what worked)
-3. If trigger score is weak leg → target description/frontmatter
-4. If functional score is weak leg → target body, references, agents
-5. If both weak → structural change
-6. 5+ consecutive discards → radical change (rewrite description, restructure SKILL.md)
-
-Incorporates `analyzer` output from Phase 5.1 of the previous iteration as additional signal.
+2. Exploit successes: read `git diff HEAD~1`, try variants of what worked. Incorporate analyzer insight from `evals/analyzer-insight.md` as additional signal.
+3. Trigger score is weak leg (< functional score) → target description/frontmatter
+4. Functional score is weak leg → target body, references, agents
+5. Both weak → structural change (add reference file, add agent, reorganize)
+6. 5+ consecutive discards → radical: rewrite description from scratch, restructure SKILL.md
 
 **Phase 3 — Modify (one atomic change):**
-
-One-sentence test: if you need "and" to describe the change, split it.
-
-| Atomic ✓ | Split ✗ |
-|---|---|
-| Add 3 trigger examples to description | Add examples AND rewrite body |
-| Extract section to references/ | Extract AND add new agent |
-| Rewrite agent instructions | Rewrite agent AND add hook |
-
-**Note on transitional states:** All Phase 3 changes must leave the plugin in a structurally valid state (passing `validate_plugin.py`). Refactors that span multiple files must be completed atomically in a single phase. Mid-refactor commits that fail validation are not allowed — if a refactor cannot be completed in one Phase 3, break it into smaller atomic steps across multiple iterations.
+- One-sentence test: if you need "and" to describe it, split it.
+- **Structural validity rule:** Every Phase 3 change must leave the plugin passing `validate_plugin.py`. If a refactor requires multiple file edits, complete all of them within the same phase as a single commit. No mid-refactor commits.
 
 **Phase 4 — Commit:**
 ```bash
-git add skills/ agents/ references/   # never git add -A
-git diff --cached --quiet             # verify something staged
+git add skills/ agents/ references/   # explicit paths — NEVER git add -A
+git diff --cached --quiet             # if exit 0: no-op, log and skip to Phase 1
+python validate_plugin.py ./          # guard: if fails, revert staged, log hook-blocked, skip to Phase 1
 git commit -m "experiment(skill): <one-sentence description>"
 ```
-`validate_plugin.py` runs as guard before `run_evals.py`. If validation fails: log `hook-blocked`, revert staged changes, move to Phase 1.
 
 **Phase 5 — Verify:**
 ```bash
-python run_evals.py   # trigger + functional in parallel (dispatching-parallel-agents pattern)
-python score.py       # weighted combined score, noise_floor check
+python run_evals.py   # trigger + functional in parallel (see Execution Path above)
+```
+Output JSON written to `evals/last-run.json`.
+
+**Phase 5.1 — Analyzer (only on Phase 6 keep decisions):**
+
+Dispatch `analyzer` agent with this exact prompt structure:
+```
+Analyze why this iteration improved the score.
+
+git_diff: <output of git diff HEAD~1>
+previous_row: <previous TSV row as string>
+current_row: <current TSV row as string>
+
+Write a 2–4 sentence insight explaining what specifically caused the score improvement.
+Output ONLY the insight text. No headers. No JSON.
 ```
 
-**Phase 5.1 — Analyzer (only on "keep" decisions):**
-After Phase 6 confirms a keep, dispatch `analyzer` agent with:
-- The kept commit diff (`git diff HEAD~1`)
-- The TSV delta
-- The previous iteration's TSV row
-
-Analyzer produces a brief insight: "trigger score +8.2 — adding 'I want to build' phrase matched developer intent vocabulary." This output is read during Phase 2 of the next iteration.
+Agent writes its output to `evals/analyzer-insight.md` (plain text, overwritten each iteration). Phase 1 of the next iteration reads this file.
 
 **Phase 6 — Decide:**
 ```
-improved AND delta > noise_floor AND validation passes → KEEP
-improved BUT validation fails → rework (max 2 attempts), then discard
-same/worse → git revert HEAD --no-edit
-crashed → fix if fixable (max 3 tries), else git revert HEAD --no-edit
+is_improvement = true AND validate_plugin passes → KEEP
+  write history.best_score = combined
+  write history.best_commit = git rev-parse --short HEAD
+  update loop.current_iteration + 1
+  dispatch analyzer (Phase 5.1)
+
+is_improvement = true AND validate_plugin fails → rework (max 2 attempts)
+  if still failing after 2: treat as DISCARD
+
+is_improvement = false → DISCARD
+  git revert HEAD --no-edit
+  if git revert conflicts: git revert --abort && git reset --hard HEAD~1
+
+crashed → fix if fixable (max 3 tries), else DISCARD
 ```
-Always prefer `git revert` over `git reset --hard` — preserves failed experiment in history.
 
 **Phase 7 — Log:**
-Append to TSV. Print summary every 10 iterations.
+Append to TSV. Every 10 iterations, print:
+```
+=== perfect-plugin Progress (iteration 10) ===
+Baseline: 67.4 → Current best: 78.9 (+11.5)
+Keeps: 4 | Discards: 5 | Crashes: 1
+Last 5: keep, discard, discard, keep, discard
+```
 
 **Phase 8 — Repeat:**
-Stop on `combined_score >= threshold` OR `current_iteration >= max_iterations`. Never ask user.
+If `combined_score >= threshold` OR `current_iteration >= max_iterations`: set `loop.status = "complete"`, print final summary, stop.
+Otherwise: go to Phase 1. Never ask user.
+
+On unexpected exit: set `loop.status = "crashed"` in state file.
 
 ---
 
 ## Scoring
 
 ```
-trigger_score    = (correct_trigger_queries / total_trigger_queries) × 100
-functional_score = (assertions_passed / total_assertions) × 100
+trigger_score    = (correct trigger queries, median across runs) / total × 100
+functional_score = average of per-eval median pass_rates across runs × 100
 combined_score   = (trigger_score × 0.4) + (functional_score × 0.6)
 ```
 
-`score.py` reads `run_evals.py` output JSON, applies weights from `perfect-plugin.json`, returns a single float. It also checks `noise_floor`: if `|combined - previous_best| < noise_floor`, returns `delta = 0` so Phase 6 treats it as "same."
-
-Noise handling: `run_evals.py` runs evals `runs_per_eval` times (default 3), takes median score per eval. Reduces false keep/discard decisions from LLM eval variance.
-
-Parallel execution: `run_evals.py` dispatches trigger and functional eval runners as independent subprocesses, merges results. Reduces wall-clock time per iteration.
+`score.py` receives `trigger_score` and `functional_score` (already medians computed by `run_evals.py`). It applies weights and noise_floor check. It does NOT re-run evals or compute medians itself.
 
 ---
 
-## CC → Cowork Conversion Checklist
+## CC → Cowork Conversion Checklist (cowork-converter agent)
 
-Owned by `cowork-converter` agent. Applied item by item:
+| # | CC artifact detected | Cowork adaptation | Decision rule |
+|---|---|---|---|
+| 1 | `claude -p` in script with captured output fed to another process | Inline eval logic (rewrite as Python that calls Claude API directly) | Use inline if the output is parsed; use static JSON if the output is only displayed |
+| 2 | `claude -p` with HTML/browser display | `--static` flag for HTML output | Always static |
+| 3 | `input()`, `sys.stdin.read()`, interactive terminal prompts | `AskUserQuestion` tool call | Always |
+| 4 | Absolute paths in any file | `${CLAUDE_PLUGIN_ROOT}` prefix | Always |
+| 5 | `type: command` hooks with CLI binaries | `type: prompt` hooks | Always |
+| 6 | `commands/*.md` legacy slash commands | Create equivalent `skills/*/SKILL.md` | Always |
+| 7 | `tools: Read, Grep` (comma string) in agent frontmatter | `tools: ["Read", "Grep"]` (JSON array) | Always |
+| 8 | MCP servers with browser-only transport | Flag as incompatible, add to unresolved items in report | Cannot auto-fix |
 
-| # | CC artifact | Cowork adaptation |
-|---|---|---|
-| 1 | `claude -p` CLI calls in scripts | Replace with inline eval logic or static JSON output |
-| 2 | Browser display / live server in scripts | Use `--static` flag for HTML output |
-| 3 | Interactive terminal prompts (stdin) | Replace with `AskUserQuestion` tool calls |
-| 4 | Hardcoded absolute paths | Replace with `${CLAUDE_PLUGIN_ROOT}` |
-| 5 | CLI-dependent hook commands | Rewrite as `prompt` type hooks |
-| 6 | `commands/*.md` legacy format | Migrate to `skills/*/SKILL.md` format |
-| 7 | `allowed-tools` lists missing Cowork tools | Audit and update tool lists |
-| 8 | Browser-only MCP servers | Flag as incompatible, suggest alternatives |
-
-After applying: run `validate_plugin.py`, then `run_evals.py` and compare to `convert.original_score`.
+Items that cannot be auto-resolved are collected into the unresolved list and appear in the failure report.
 
 ---
 
@@ -412,31 +510,45 @@ After applying: run `validate_plugin.py`, then `run_evals.py` and compare to `co
 
 ### `eval-generator` (NEW)
 
-Input: list of `{ id, description, expected_behavior }` from collect dialogue.
-Output: `evals/trigger-eval.json` and `evals/evals.json` conforming to schemas above.
+**Input prompt structure:**
+```
+Generate trigger and functional evals from these use cases:
+use_cases: [{ id, description, expected_behavior }]
+trigger_output_path: evals/trigger-eval.json
+functional_output_path: evals/evals.json
+```
 
-Knows good/bad assertion rules. Enforces 10–20 trigger queries, 60/40 positive/negative split.
+**Output:** writes both files conforming to schemas above. Enforces 10–20 trigger entries, 60/40 split, verifiable assertions only.
 
-### `grader` (ADAPTED from plugin-forge)
+### `grader` (TRIMMED from plugin-forge)
 
-Input: eval prompt, expected_behavior, transcript path, output directory path.
-Output: `grading.json` conforming to schema above.
+**Input prompt structure:**
+```
+Grade this eval execution:
+eval_id: eval-001
+expectations: ["...", "..."]
+transcript_path: evals/transcripts/eval-001-run-1.md
+output_path: evals/transcripts/eval-001-run-1-grading.json
+```
 
-Grades each expectation with pass/fail, evidence quote, and improvement suggestion.
+**Output:** writes `grading.json` conforming to trimmed schema above.
 
-### `analyzer` (ADAPTED from plugin-forge)
+### `analyzer` (NEW — not adapted from plugin-forge)
 
-Input: git diff of kept commit, previous TSV row, current TSV row.
-Output: one-paragraph insight on what specifically drove the score improvement.
-
-Runs only after Phase 6 confirms a keep. Output is read at the start of the next iteration's Phase 2. Does not modify any files.
+**Input:** git diff string + two TSV row strings (passed inline in prompt by loop, see Phase 5.1).
+**Output:** plain text written to `evals/analyzer-insight.md`. No other file writes. No JSON.
 
 ### `cowork-converter` (NEW)
 
-Input: existing CC plugin directory.
-Output: modified plugin files (applies conversion checklist in-place).
+**Input prompt structure:**
+```
+Convert this Claude Code plugin to Cowork compatibility:
+plugin_path: ./
+checklist: [items 1-8 above]
+report_path: evals/convert-report.md
+```
 
-Works through checklist items sequentially, reports each change made, flags any items it cannot automatically resolve.
+**Output:** modifies plugin files in-place. Writes conversion report to `evals/convert-report.md` listing each checklist item: resolved, unresolved, or skipped.
 
 ---
 
@@ -444,37 +556,33 @@ Works through checklist items sequentially, reports each change made, flags any 
 
 ### `run_evals.py`
 
-1. Reads `perfect-plugin.json` for eval paths, runs_per_eval
-2. Spawns trigger eval runner (via `claude -p`) and functional eval runner (grader agent) in parallel
-3. Runs each `runs_per_eval` times, takes median pass_rate
-4. Aggregates into output JSON (schema above)
-5. Writes grading.json files to `evals/transcripts/`
+Full execution path defined in the `run_evals.py` section above. Also supports `--baseline` flag which skips the improvement check in `score.py` and always writes the result as the baseline.
 
 ### `score.py`
 
-Input: `run_evals.py` output JSON, previous best score, weights, noise_floor (all from `perfect-plugin.json`).
-Output: `{ "combined": float, "delta": float, "is_improvement": bool }`.
+Input: JSON with `trigger_score`, `functional_score`, `previous_best`, `weights`, `noise_floor`.
+Output: JSON with `combined`, `delta`, `is_improvement`.
+Logic: `combined = t×0.4 + f×0.6`. `delta = combined - previous_best`. `is_improvement = delta > noise_floor`.
 
 ### `validate_plugin.py`
 
-Runs the 6 validation rules defined above. Exits 0 on pass, non-zero on any failure. Prints which rule failed. Adapted from plugin-forge `quick_validate.py`.
+6 rules defined above. Scans all `.md`, `.json`, `.yaml`, `.toml` files in the plugin tree. Exits non-zero on any failure, prints the failing rule name and offending file path/value.
 
 ---
 
 ## Success Criteria
 
-1. A developer can run `/perfect-plugin:collect` → `/perfect-plugin:build` → `/perfect-plugin:optimize` (with `Iterations: 10` for a bounded first run) and end with a git-tracked plugin with a TSV log showing score progression. Measurable: git log shows baseline commit + experiment commits; TSV exists with ≥1 keep.
-2. The optimize loop runs without prompting the user between iterations until `combined_score >= threshold` OR `max_iterations` reached. Measurable: no `AskUserQuestion` calls in loop phases 1–8.
-3. A converted CC plugin passes `validate_plugin.py` and `run_evals.py` scores within 5 points of `convert.original_score`. Measurable: `|post_convert_score - convert.original_score| ≤ 5`.
-4. The TSV log has one row per iteration with all columns populated. Measurable: `wc -l perfect-plugin-results.tsv` equals `loop.current_iteration + 1` (baseline + iterations).
+1. `/collect` → `/build` → `/optimize` (Iterations: 10) produces a git-tracked plugin with a TSV log showing score progression. **Measurable:** `git log` shows baseline + experiment commits; `wc -l perfect-plugin-results.tsv` ≥ 2; TSV has ≥1 row with `status=keep`.
+2. Optimize loop runs without `AskUserQuestion` in phases 1–8. **Measurable:** grep for `AskUserQuestion` in loop output = 0 matches.
+3. Converted CC plugin passes `validate_plugin.py` and scores within 5 points of `convert.original_score`. **Measurable:** `|post_convert_score - convert.original_score| ≤ 5`.
+4. TSV has exactly one row per iteration. **Measurable:** `wc -l perfect-plugin-results.tsv` = `loop.current_iteration + 1` (baseline row + one per iteration).
 
 ---
 
 ## Out of Scope
 
-- Calling the `autoresearch` or `plugin-forge` plugins at runtime (knowledge is embedded, not delegated)
-- Multi-platform builds (`platform: "both"`) — `"cowork"` or `"claude-code"` only
+- Runtime delegation to autoresearch or plugin-forge plugins
+- `platform: "both"` — cowork or claude-code only, not simultaneous
 - Publishing to marketplace
-- Claude.ai web support (requires `claude -p` for trigger evals)
+- Claude.ai web support (requires `claude -p`)
 - Multi-plugin optimization in one loop run
-- Automatic marketplace submission after loop completes
