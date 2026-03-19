@@ -183,12 +183,17 @@ Bad expectations: "Output looks reasonable", "Claude used the skill", "Output is
 2. Run trigger and functional branches IN PARALLEL (two subprocesses)
 
 TRIGGER BRANCH — how trigger detection works:
+  skill_name is read from the target plugin's SKILL.md frontmatter `name:` field before the loop starts.
+  The detection pattern is: "Using {skill_name} to" (case-insensitive).
+  This pattern is emitted by Claude Code whenever a skill is invoked — it is a platform-level
+  announcement that appears in the transcript for any plugin following the SKILL.md format.
+  All plugins built or processed by perfect-plugin use SKILL.md, so this pattern is always present.
+
   For each run in 1..runs_per_eval:
     For each entry in trigger-eval.json:
       Run: claude -p "<query>" --plugin <plugin_path>
       Capture full stdout transcript
-      Detect trigger: search transcript for the pattern "Using [skill-name] to"
-        (this is the standard superpowers skill invocation announcement)
+      Detect trigger: search transcript (case-insensitive) for "Using {skill_name} to"
         If found → triggered = true
         If not found → triggered = false
       did_trigger_correctly = (triggered == entry.should_trigger)
@@ -196,23 +201,30 @@ TRIGGER BRANCH — how trigger detection works:
   trigger_score = (queries where pass_rate >= 0.5) / total_queries × 100
 
 FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
-  input_files in evals.json are passed as --context flags to provide INPUT context
-  to the eval prompt; they are not output artefacts. The grader reads the transcript only.
+  input_files in evals.json provide INPUT context to the eval prompt; they are not output artefacts.
 
-  For each run in 1..runs_per_eval:
-    For each eval in evals.json:
-      context_flags = ["--context " + f for f in eval.input_files]  # may be empty
-      Run: claude -p "<eval.prompt>" --plugin <plugin_path> <context_flags>
-      Save transcript to: evals/transcripts/eval-{id}-run-{n}.md
-      Dispatch grader agent:
-        Input: {eval_id: eval.id,
-                expectations: eval.expectations,
-                transcript_path: "evals/transcripts/eval-{id}-run-{n}.md",
-                output_path: "evals/transcripts/eval-{id}-run-{n}-grading.json"}
-        Grader reads the transcript and grades each expectation against it.
-        Grader writes output to: evals/transcripts/eval-{id}-run-{n}-grading.json
-  For each eval: collect pass_rate from all its grading.json files → compute median
-  functional_score = average of per-eval median pass_rates × 100
+  run_evals.py handles transcript generation only. Grader dispatch is handled by Claude
+  (the main session), NOT by the Python script, because Claude agents cannot be spawned
+  from Python subprocesses. The split is:
+
+  run_evals.py Step 2 (functional — transcript generation):
+    For each run in 1..runs_per_eval:
+      For each eval in evals.json:
+        context_flags = ["--context " + f for f in eval.input_files]  # may be empty
+        Run: claude -p "<eval.prompt>" --plugin <plugin_path> <context_flags>
+        Save transcript to: evals/transcripts/eval-{id}-run-{n}.md
+    Write transcripts-to-grade.json: list of {eval_id, expectations, transcript_path, output_path}
+    Exit (return transcript list to Claude)
+
+  Claude (main session) Step 2b — grader dispatch:
+    Read evals/transcripts-to-grade.json
+    For each entry: dispatch grader agent with {eval_id, expectations, transcript_path, output_path}
+    Wait for all graders to complete (all grading.json files exist)
+
+  run_evals.py Step 3 — score computation (called again by Claude after graders complete):
+    For each eval: collect pass_rate from all grading.json files → compute median
+    functional_score = average of per-eval median pass_rates × 100
+    Call score.py (step 3 below)
 
 3. Call score.py:
    Input JSON: {trigger_score, functional_score, previous_best (from step 1),
@@ -220,6 +232,10 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
    Receives output JSON: {combined, delta, is_improvement}
 
 4. Output JSON (schema below)
+
+**run_evals.py supports two modes:**
+- `--generate-transcripts`: runs claude -p for trigger queries + eval prompts, writes transcripts-to-grade.json, exits
+- `--score` (default after graders complete): reads grading.json files, calls score.py, outputs score JSON
 ```
 
 ### `run_evals.py` Output Schema
@@ -367,10 +383,31 @@ Reads `perfect-plugin.json` if it exists (resume mid-pipeline). Otherwise runs c
 1. Reads `perfect-plugin.json` — platform, use cases, evals
 2. Determines required components (YAGNI: only what the use cases actually need)
 3. Produces a minimal skeleton:
-   - `.claude-plugin/plugin.json` with `name` derived from target directory name, version `0.1.0`
-   - `skills/<plugin-name>/SKILL.md` with frontmatter `name` + a draft `description` generated from the use cases
-   - `evals/` directory containing the files already written by `:collect`
-   - Additional components (agents, references, hooks) only if a use case explicitly requires them
+
+   **`.claude-plugin/plugin.json`:**
+   ```json
+   { "name": "<target-dir-name-in-kebab-case>", "version": "0.1.0" }
+   ```
+   Plugin name = the target directory's base name, lowercased, spaces replaced with hyphens. Validated against kebab-case regex before writing.
+
+   **`skills/<plugin-name>/SKILL.md`:**
+   ```markdown
+   ---
+   name: <plugin-name>
+   description: >
+     <One-paragraph summary synthesized from use_cases[].expected_behavior.
+      Includes trigger phrases derived from use_cases[].description.
+      Formatted as: "Use this skill when [trigger phrases from use cases]. [Expected behaviors].">
+   ---
+
+   # <Plugin Name>
+
+   [Placeholder body — the optimize loop will refine this content.]
+   ```
+
+   **`evals/`** — the files already written by `:collect` (trigger-eval.json + evals.json). No additional content generated here.
+
+   Additional components (agents, references, hooks) only if a use case explicitly requires a multi-step workflow, external tool, or event-driven behavior.
 4. Runs `validate_plugin.py` — structural gate. Fails fast.
 5. Runs `run_evals.py` — establishes baseline. Writes `history.baseline_score` and `history.best_score` to state file.
 6. Initializes `perfect-plugin-results.tsv` with baseline row.
@@ -447,12 +484,18 @@ git add skills/ agents/ references/   # explicit paths — NEVER git add -A
 git diff --cached --quiet             # if exit 0: no-op, log status=no-op and skip to Phase 1
 python validate_plugin.py ./          # if fails: revert staged (git checkout -- .), log status=validation-failed, skip to Phase 1
 git commit -m "experiment(skill): <one-sentence description>"
-# if git pre-commit hook rejects commit: log status=hook-blocked, skip to Phase 1
+# if git commit fails due to a pre-existing git pre-commit hook in the repo
+# (e.g. husky, pre-commit framework — NOT installed by perfect-plugin):
+# log status=hook-blocked, skip to Phase 1
 ```
+
+**Note:** `hook-blocked` refers to git pre-commit hooks already present in the target repo (e.g. configured by the developer). `perfect-plugin` does not install any git hooks. If `validate_plugin.py` fails (before the commit), the status is `validation-failed`, not `hook-blocked`.
 
 **Phase 5 — Verify:**
 ```bash
-python run_evals.py   # trigger + functional in parallel (see Execution Path above)
+python run_evals.py --generate-transcripts   # trigger queries + eval transcript generation
+# Claude then dispatches grader agents for each entry in evals/transcripts-to-grade.json
+python run_evals.py --score                  # reads grading.json files, calls score.py
 ```
 Output JSON written to `evals/last-run.json`.
 
@@ -562,6 +605,8 @@ functional_output_path: evals/evals.json
 
 ### `grader` (TRIMMED from plugin-forge)
 
+**Behavioral contract:** For each expectation string, the grader reads the transcript, searches for evidence that the expectation was or was not met, and records `passed: true/false` with a verbatim quote from the transcript as evidence. If no evidence is found, `passed: false` and `evidence: "Not found in transcript"`. The grader does not infer or hallucinate evidence — it only quotes.
+
 **Input prompt structure:**
 ```
 Grade this eval execution:
@@ -569,9 +614,16 @@ eval_id: eval-001
 expectations: ["...", "..."]
 transcript_path: evals/transcripts/eval-001-run-1.md
 output_path: evals/transcripts/eval-001-run-1-grading.json
+
+For each expectation:
+1. Read the transcript at transcript_path
+2. Search for evidence that the expectation was met or not met
+3. Record passed (true/false) and a verbatim quote from the transcript as evidence
+4. If no evidence found: passed=false, evidence="Not found in transcript"
+Write results to output_path as JSON conforming to the grading.json schema.
 ```
 
-**Output:** writes `grading.json` conforming to trimmed schema above.
+**Output:** writes `grading.json` conforming to trimmed schema above. Source: plugin-forge grader.md logic retained for the core grade-per-expectation loop. Fields removed: execution_metrics, timing, claims, user_notes_summary, eval_feedback, outputs_dir.
 
 ### `analyzer` (NEW — not adapted from plugin-forge)
 
