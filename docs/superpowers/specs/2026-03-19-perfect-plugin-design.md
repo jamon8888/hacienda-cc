@@ -471,7 +471,7 @@ abort with: "Run `/perfect-plugin:collect` first to generate evals before conver
    on the existing CC plugin → stores combined_score result as `convert.original_score` in state file
 2. Dispatches `cowork-converter` agent → applies conversion checklist in-place
 3. Runs `validate_plugin.py` on converted result
-4. Runs `run_evals.py` again → compares to `convert.original_score`
+4. Runs `run_evals.py --generate-transcripts` → Claude dispatches graders → `run_evals.py --score` → compares to `convert.original_score`
 5. **If score dropped ≤ 5 points:** report success. Print conversion summary table.
 6. **If score dropped > 5 points:** print per-component report (format below). Do NOT auto-revert. This is advisory — the developer decides whether to accept the result or run `/perfect-plugin:optimize` to recover the lost score.
 
