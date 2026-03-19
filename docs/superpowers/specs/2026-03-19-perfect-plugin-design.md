@@ -267,7 +267,7 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
     Claude then calls python run_evals.py --score.
 
   run_evals.py Step 3 — score computation (called again by Claude after graders complete):
-    Re-read evals/transcripts-to-grade.json to get the list of output_path values
+    Re-read evals/transcripts-to-grade.json → get all entries (one per eval×run)
     Re-read evals/trigger-results.json → get per-query pass_rate_q values and total_queries
     Compute trigger detail from trigger-results.json (NOT from score.py output):
       trigger_detail.passed = count(queries where pass_rate_q >= 0.5)
@@ -275,13 +275,13 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
       trigger_detail.total = total_queries
       trigger_detail.failures = [query strings where pass_rate_q < 0.5]
       trigger_score = trigger_detail.passed / trigger_detail.total × 100
-    For each eval: read grading.json at the output_path listed in transcripts-to-grade.json
-    Compute per-eval median: median(grading.summary.pass_rate across all N runs for that eval)
-    functional_score = average(per-eval medians) × 100
-    (i.e., average the per-eval medians across all evals, not a flat average across all runs)
+    Group transcripts-to-grade.json entries by eval_id.
+    For each unique eval_id: read all N grading.json files (at their respective output_paths).
+    Compute per-eval median: median(grading.summary.pass_rate across all N grading.json files for that eval_id)
+    functional_score = average(per-eval medians across all unique eval_ids) × 100
     Compute functional detail from per-eval medians:
-      passed_evals = count(evals where per-eval median >= 0.5)  ← fixed threshold, not configurable
-      failed_evals = total_evals - passed_evals
+      passed_evals = count(eval_ids where per-eval median >= 0.5)  ← fixed threshold, not configurable
+      failed_evals = total_eval_ids - passed_evals
     Call score.py (step 3 below)
 
 3. Call score.py (subprocess):
