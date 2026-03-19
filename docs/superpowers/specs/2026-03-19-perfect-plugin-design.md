@@ -220,8 +220,25 @@ FUNCTIONAL BRANCH — evals are transcript-only (no output file artefacts):
         context_flags = ["--context " + f for f in eval.input_files]  # may be empty
         Run: claude -p "<eval.prompt>" --plugin <plugin_path> <context_flags>
         Save transcript to: evals/transcripts/eval-{id}-run-{n}.md
-    Write transcripts-to-grade.json: list of {eval_id, expectations, transcript_path, output_path}
-    Exit (return transcript list to Claude)
+    Write evals/transcripts-to-grade.json: list of {eval_id, expectations, transcript_path, output_path}
+
+  Write trigger results to evals/trigger-results.json (survives between process invocations):
+  ```json
+  {
+    "skill_name": "target-plugin-name",
+    "runs_per_eval": 3,
+    "queries": [
+      {
+        "query": "string",
+        "should_trigger": true,
+        "results": [true, false, true],
+        "pass_rate_q": 0.67
+      }
+    ],
+    "total_queries": 15
+  }
+  ```
+  Exit (both files written; Claude will dispatch graders then call --score)
 
   Claude (main session) Step 2b — grader dispatch:
     Read evals/transcripts-to-grade.json
