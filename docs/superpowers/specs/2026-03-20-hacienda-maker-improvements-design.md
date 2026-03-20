@@ -137,9 +137,24 @@ python skills/hacienda-maker/scripts/grader.py \
 ```
 
 Le script :
-1. Lit le transcript
-2. Pour chaque expectation déterministe → évalue directement
-3. Pour les expectations `semantic` → appelle le LLM grader agent via `claude -p`
+1. Lit le transcript depuis `--transcript`
+2. Pour chaque expectation déterministe → évalue directement (voir tableau des types)
+3. Pour les expectations `semantic` → appelle `claude -p` avec le prompt suivant :
+
+```
+Transcript:
+<contenu du transcript>
+
+Expectation: "<text de l'expectation>"
+
+Est-ce que le transcript satisfait cette expectation ?
+Réponds en JSON strict : {"passed": true|false, "evidence": "citation verbatim du transcript, ou 'Not found' si absent"}
+```
+
+Flags utilisés : `--output-format json --print` (pas de `--plugin-dir` — le grader n'a pas besoin du plugin).
+Le champ `result` du JSON de sortie est parsé pour extraire `passed` et `evidence`.
+Si le JSON ne parse pas → `passed: false`, `evidence: "grader parse error"`.
+
 4. Agrège en `grading.json` avec le schéma existant + champ `"grader_type"` par expectation
 
 ### Schéma `grading.json` (étendu)
@@ -176,9 +191,20 @@ L'agent `grader.md` est mis à jour pour :
 2. Recevoir uniquement ces expectations (pas les déterministes)
 3. Retourner uniquement les résultats des expectations sémantiques
 
-### Mise à jour de `run_evals.py`
+### Orchestration dans `run_evals.py`
 
-`mode_generate_transcripts` dispatch `grader.py` (script Python) au lieu de l'agent grader. L'agent grader n'est appelé que si des expectations `semantic` existent dans le transcript à noter.
+`mode_generate_transcripts` est étendu pour appeler `grader.py` directement après avoir généré chaque transcript, **dans la même passe**. Le flux devient :
+
+```
+pour chaque eval × run :
+  1. claude -p → transcript écrit dans evals/transcripts/{eval_id}-run-{n}.md
+  2. grader.py --transcript ... --expectations ... --output ... → grading.json écrit
+  3. entrée ajoutée dans transcripts-to-grade.json (inchangé pour compatibilité --score)
+```
+
+`grader.py` est appelé via `subprocess.run([sys.executable, str(GRADER_PY), ...])` avec les expectations extraites de `eval_entry["expectations"]` sérialisées en JSON dans `--expectations`.
+
+L'ancien workflow "dispatch agent grader manuellement" disparaît — `run_evals.py --generate-transcripts` produit maintenant les grading.json directement. `transcripts-to-grade.json` conserve les mêmes champs pour que `--score` continue de fonctionner sans changement.
 
 ---
 
