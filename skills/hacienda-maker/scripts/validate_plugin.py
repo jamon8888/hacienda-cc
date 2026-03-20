@@ -89,8 +89,11 @@ def main():
             if tools is not None and isinstance(tools, str):
                 fail("Rule 4", f"{path}: tools: is a comma-separated string, must be YAML sequence")
 
-    # Rule 5: no absolute paths in any scanned file
+    # Rule 5: no absolute paths in any scanned file (hooks/hooks.json is handled by Rule 6)
+    hooks_json_path = plugin_dir / 'hooks/hooks.json'
     for path in scan_files(plugin_dir):
+        if path.resolve() == hooks_json_path.resolve():
+            continue
         content = path.read_text(errors='replace')
         for line_num, line in enumerate(content.splitlines(), 1):
             if re.search(r'/Users/|/home/|/root/', line) or re.search(r'C:\\', line):
