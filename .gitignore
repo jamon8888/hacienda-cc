@@ -1,0 +1,10 @@
+hacienda-maker.json
+hacienda-maker-results.tsv
+evals/transcripts/
+evals/last-run.json
+evals/trigger-results.json
+evals/transcripts-to-grade.json
+evals/analyzer-insight.md
+__pycache__/
+*.pyc
+.pytest_cache/
