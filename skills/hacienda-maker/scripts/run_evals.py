@@ -124,10 +124,103 @@ def mode_score(cwd: Path, baseline: bool = False):
     print(json.dumps(last_run, indent=2))
 
 
+def read_skill_name(plugin_dir: Path) -> str:
+    """Read skill name from SKILL.md frontmatter."""
+    import re
+    for skill_md in plugin_dir.glob("skills/*/SKILL.md"):
+        text = skill_md.read_text()
+        m = re.search(r'^name:\s*(\S+)', text, re.MULTILINE)
+        if m:
+            return m.group(1)
+    raise ValueError("Could not find skill name in any skills/*/SKILL.md")
+
+
 def mode_generate_transcripts(cwd: Path):
-    # Implemented in Task 6
-    print("--generate-transcripts not yet implemented", file=sys.stderr)
-    sys.exit(1)
+    state = load_state(cwd)
+    scoring = state["scoring"]
+    runs_per_eval = scoring["runs_per_eval"]
+    evals_path = state.get("evals", {})
+
+    trigger_eval_path = cwd / evals_path.get("trigger_path", "evals/trigger-eval.json")
+    functional_eval_path = cwd / evals_path.get("functional_path", "evals/evals.json")
+
+    trigger_evals = json.loads(trigger_eval_path.read_text()) if trigger_eval_path.exists() else []
+    functional_evals = json.loads(functional_eval_path.read_text()) if functional_eval_path.exists() else []
+
+    skill_name = read_skill_name(cwd)
+    system_msg = (f"After completing your response, on a new line write exactly: "
+                  f"SKILL_USED: {skill_name} or SKILL_USED: none")
+
+    # TRIGGER BRANCH
+    query_results = {i: [] for i in range(len(trigger_evals))}
+    for run_n in range(1, runs_per_eval + 1):
+        for i, entry in enumerate(trigger_evals):
+            result = subprocess.run(
+                ["claude", "-p", entry["query"],
+                 "--plugin", str(cwd),
+                 "--system", system_msg],
+                capture_output=True, text=True
+            )
+            transcript = result.stdout
+            lines = transcript.strip().splitlines()
+            last_lines = lines[-3:] if len(lines) >= 3 else lines
+            triggered = any(f"SKILL_USED: {skill_name}".lower() in l.lower() for l in last_lines)
+            query_results[i].append(triggered)
+
+    trigger_results_data = {
+        "skill_name": skill_name,
+        "runs_per_eval": runs_per_eval,
+        "queries": [],
+        "total_queries": len(trigger_evals)
+    }
+    for i, entry in enumerate(trigger_evals):
+        results = query_results[i]
+        pass_rate_q = sum(1 for r, e in zip(results, [entry["should_trigger"]] * len(results))
+                          if r == e) / len(results) if results else 0.0
+        trigger_results_data["queries"].append({
+            "query": entry["query"],
+            "should_trigger": entry["should_trigger"],
+            "results": results,
+            "pass_rate_q": round(pass_rate_q, 4)
+        })
+
+    evals_dir = cwd / "evals"
+    evals_dir.mkdir(exist_ok=True)
+    (evals_dir / "trigger-results.json").write_text(json.dumps(trigger_results_data, indent=2))
+
+    # FUNCTIONAL BRANCH
+    transcripts_dir = evals_dir / "transcripts"
+    transcripts_dir.mkdir(exist_ok=True)
+    transcripts_to_grade = []
+
+    for run_n in range(1, runs_per_eval + 1):
+        for eval_entry in functional_evals:
+            eval_id = eval_entry["id"]
+            prompt = eval_entry["prompt"]
+            input_files = eval_entry.get("input_files", [])
+            context_flags = []
+            for f in input_files:
+                context_flags += ["--context", str(cwd / f)]
+
+            result = subprocess.run(
+                ["claude", "-p", prompt, "--plugin", str(cwd)] + context_flags,
+                capture_output=True, text=True
+            )
+            transcript_path = transcripts_dir / f"{eval_id}-run-{run_n}.md"
+            transcript_path.write_text(result.stdout)
+
+            output_path = f"evals/transcripts/{eval_id}-run-{run_n}-grading.json"
+            transcripts_to_grade.append({
+                "eval_id": eval_id,
+                "run_n": run_n,
+                "expectations": eval_entry.get("expectations", []),
+                "transcript_path": f"evals/transcripts/{eval_id}-run-{run_n}.md",
+                "output_path": output_path
+            })
+
+    (evals_dir / "transcripts-to-grade.json").write_text(json.dumps(transcripts_to_grade, indent=2))
+    print(f"Written: evals/trigger-results.json, evals/transcripts-to-grade.json")
+    print(f"Transcripts: {len(transcripts_to_grade)} entries ({runs_per_eval} runs × {len(functional_evals)} evals)")
 
 
 def main():
