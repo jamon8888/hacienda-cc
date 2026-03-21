@@ -28,7 +28,7 @@ def make_plugin(tmp: Path, skill_name: str = "test-skill"):
         "evals": {"trigger_path": "evals/trigger-eval.json", "functional_path": "evals/evals.json"},
         "history": {"best_score": None}
     }
-    (tmp / "hacienda-maker.json").write_text(json.dumps(state))
+    (tmp / "hm.json").write_text(json.dumps(state))
     return tmp
 
 

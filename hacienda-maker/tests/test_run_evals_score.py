@@ -15,9 +15,9 @@ def make_state(tmp: Path, best_score=None):
         "scoring": {"weights": {"trigger": 0.4, "functional": 0.6},
                     "threshold": 85, "noise_floor": 2.0, "runs_per_eval": 3},
         "history": {"baseline_score": None, "best_score": best_score,
-                    "best_commit": None, "results_log": "hacienda-maker-results.tsv"}
+                    "best_commit": None, "results_log": "hm-results.tsv"}
     }
-    (tmp / "hacienda-maker.json").write_text(json.dumps(state))
+    (tmp / "hm.json").write_text(json.dumps(state))
     return state
 
 
@@ -150,7 +150,7 @@ def test_best_score_updated_on_improvement():
         code, out = run_score_mode(tmp)
         assert code == 0
         assert out["is_improvement"] is True
-        state = json.loads((tmp / "hacienda-maker.json").read_text())
+        state = json.loads((tmp / "hm.json").read_text())
         assert state["history"]["best_score"] == out["combined_score"], \
             "best_score should be updated to combined_score after improvement"
 
@@ -168,7 +168,7 @@ def test_best_commit_updated_on_improvement():
         code, out = run_score_mode(tmp)
         assert code == 0
         assert out["is_improvement"] is True
-        state = json.loads((tmp / "hacienda-maker.json").read_text())
+        state = json.loads((tmp / "hm.json").read_text())
         assert state["history"]["best_commit"] is not None, \
             "best_commit should be set (not None) after improvement"
 
@@ -186,7 +186,7 @@ def test_best_score_not_updated_when_no_improvement():
         code, out = run_score_mode(tmp)
         assert code == 0
         assert out["is_improvement"] is False
-        state = json.loads((tmp / "hacienda-maker.json").read_text())
+        state = json.loads((tmp / "hm.json").read_text())
         assert state["history"]["best_score"] == 99.0, \
             "best_score should NOT change when no improvement"
 

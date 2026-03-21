@@ -13,9 +13,9 @@ def setup_minimal(tmp: Path, best_score=None):
         "scoring": {"weights": {"trigger": 0.4, "functional": 0.6},
                     "threshold": 85, "noise_floor": 2.0, "runs_per_eval": 3},
         "history": {"baseline_score": None, "best_score": best_score,
-                    "best_commit": None, "results_log": "hacienda-maker-results.tsv"}
+                    "best_commit": None, "results_log": "hm-results.tsv"}
     }
-    (tmp / "hacienda-maker.json").write_text(json.dumps(state))
+    (tmp / "hm.json").write_text(json.dumps(state))
     evals = tmp / "evals"
     evals.mkdir()
     (evals / "trigger-results.json").write_text(json.dumps({
@@ -31,7 +31,7 @@ def run(tmp: Path, mode: list) -> dict:
         [sys.executable, str(RUN_EVALS_PY)] + mode,
         capture_output=True, text=True, cwd=str(tmp), check=True
     )
-    return json.loads((tmp / "hacienda-maker.json").read_text())
+    return json.loads((tmp / "hm.json").read_text())
 
 
 def test_baseline_writes_baseline_score(tmp_path):

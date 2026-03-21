@@ -14,10 +14,10 @@ from collections import defaultdict
 
 
 def load_state(cwd: Path) -> dict:
-    return json.loads((cwd / "hacienda-maker.json").read_text())
+    return json.loads((cwd / "hm.json").read_text())
 
 def write_state(cwd: Path, state: dict):
-    (cwd / "hacienda-maker.json").write_text(json.dumps(state, indent=2))
+    (cwd / "hm.json").write_text(json.dumps(state, indent=2))
 
 
 def write_failed_grading(output_path: Path, entry: dict, reason: str):
