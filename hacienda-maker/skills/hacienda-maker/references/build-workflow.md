@@ -23,14 +23,16 @@ At the start of the workflow:
 3. Create minimal skeleton:
    - `.claude-plugin/plugin.json` with `{"name": "<plugin-name>", "version": "0.1.0"}`
    - `skills/<plugin-name>/SKILL.md` with frontmatter synthesized from use cases
-4. Run structural gate: `python skills/hacienda-maker/scripts/validate_plugin.py .`
-   - If fails: print Rule N error and stop. User must fix before continuing.
-5. Run baseline:
-   ```bash
-   python skills/hacienda-maker/scripts/run_evals.py --generate-transcripts
-   python skills/hacienda-maker/scripts/run_evals.py --grade
-   python skills/hacienda-maker/scripts/run_evals.py --score --baseline
-   ```
+4. Run structural validation:
+   - Check `.claude-plugin/plugin.json` exists and has `name` field
+   - Check `skills/*/SKILL.md` exists with valid frontmatter
+   - If fails: print error and stop. User must fix before continuing.
+5. Run inline baseline evaluation:
+   - Read `references/inline-evaluation.md` for protocol
+   - Run trigger evaluation: match trigger-eval.json queries against SKILL.md
+   - Run functional evaluation: execute evals.json prompts, check expectations
+   - Compute combined score
+   - Write `evals/last-run.json`
 6. Initialize TSV log: write header row to `hm-results.tsv`:
    ```
    iteration\tcombined_score\ttrigger_score\tfunctional_score\tdelta\tis_improvement\tcommit_sha\ttimestamp
@@ -66,7 +68,7 @@ At the start of the workflow:
    - Create `README.md`
 
 5. **Package** — deliver the finished plugin:
-   - Validate: `python skills/hacienda-maker/scripts/validate_plugin.py <plugin-dir>`
+   - Validate: check plugin.json and SKILL.md structure
    - Create outputs directory: `mkdir -p ./outputs`
    - Package: `cd <plugin-dir> && zip -r ../outputs/<name>.plugin . -x "*.DS_Store"`
    - Present `.plugin` file to user
