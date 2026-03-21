@@ -1,4 +1,4 @@
-# State File: hacienda-maker.json
+# State File: hm.json
 
 This file is created in the target plugin directory and gitignored. It tracks evaluation state across sessions.
 
@@ -30,7 +30,7 @@ This file is created in the target plugin directory and gitignored. It tracks ev
     "baseline_score": null,
     "best_score": null,
     "best_commit": null,
-    "results_log": "hacienda-maker-results.tsv"
+    "results_log": "hm-results.tsv"
   },
   "convert": {
     "original_platform": null,
@@ -51,8 +51,8 @@ This file is created in the target plugin directory and gitignored. It tracks ev
 
 Add to `.gitignore`:
 ```
-hacienda-maker.json
-hacienda-maker-results.tsv
+hm.json
+hm-results.tsv
 evals/transcripts/
 evals/last-run.json
 evals/trigger-results.json

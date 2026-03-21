@@ -1,16 +1,16 @@
 ---
 description: >
-  Use when the user runs /hacienda-maker:convert. Converts a Claude Code plugin to
+  Use when the user runs /hm:convert. Converts a Claude Code plugin to
   Cowork-compatible format with score verification.
 ---
 
-# /hacienda-maker:convert
+# /hm:convert
 
 Read `references/convert-workflow.md` for the full protocol.
 
 **Precondition:** `evals/trigger-eval.json` and `evals/evals.json` must exist.
 If either is missing, abort with:
-"Run `/hacienda-maker:collect` first to generate evals before converting."
+"Run `/hm:collect` first to generate evals before converting."
 
 Summary:
 1. Write current `platform` value to `convert.original_platform` in state file.

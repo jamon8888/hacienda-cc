@@ -7,11 +7,11 @@ Convert a Claude Code plugin to Cowork-compatible format, verifying score is pre
 ## Precondition
 
 `evals/trigger-eval.json` and `evals/evals.json` must exist. If missing, abort:
-"Run /hacienda-maker:collect first to generate evals before converting."
+"Run /hm:collect first to generate evals before converting."
 
 ## Steps
 
-1. Write `convert.original_platform = hacienda-maker.json["platform"]` to state.
+1. Write `convert.original_platform = hm.json["platform"]` to state.
 2. Run pre-conversion evals → store result as `convert.original_score`.
 3. Dispatch `cowork-converter` agent:
    ```

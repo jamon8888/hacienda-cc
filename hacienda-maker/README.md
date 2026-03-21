@@ -24,7 +24,7 @@ correctness, then iterates until a score threshold is reached.
 
 ## Configuration
 
-Edit `hacienda-maker.json` to adjust:
+Edit `hm.json` to adjust:
 - `scoring.threshold` (default 85) — stop when combined score reaches this
 - `loop.max_iterations` (default 30) — hard iteration cap
 - `scoring.noise_floor` (default 2.0) — minimum improvement to count as a KEEP

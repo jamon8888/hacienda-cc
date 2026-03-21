@@ -1,10 +1,10 @@
 ---
 description: >
-  Use when the user runs /hacienda-maker:optimize. Executes the 8-phase autonomous
+  Use when the user runs /hm:optimize. Executes the 8-phase autonomous
   improvement loop until score threshold or iteration limit.
 ---
 
-# /hacienda-maker:optimize
+# /hm:optimize
 
 Read `references/optimize-loop.md` for the full 8-phase protocol.
 

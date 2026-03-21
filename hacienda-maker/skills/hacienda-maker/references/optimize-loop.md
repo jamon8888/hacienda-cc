@@ -20,8 +20,8 @@ Set `loop.status = "running"`, `loop.current_iteration = 0`.
 ```bash
 git log --oneline -5        # recent history
 git diff HEAD~1             # last change if any
-tail -5 hacienda-maker-results.tsv   # recent scores
-cat hacienda-maker.json     # current state
+tail -5 hm-results.tsv      # recent scores
+cat hm.json                  # current state
 cat evals/analyzer-insight.md 2>/dev/null  # last insight if exists
 ```
 
@@ -85,7 +85,7 @@ Note: "no-op streak" counts consecutive iterations where either (a) no commit wa
 
 ## Phase 7: Log Progress
 
-Append to `hacienda-maker-results.tsv`:
+Append to `hm-results.tsv`:
 ```
 {iteration}\t{combined_score}\t{trigger_score}\t{functional_score}\t{delta}\t{is_improvement}\t{commit_sha}\t{timestamp}
 ```

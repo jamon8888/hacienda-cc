@@ -8,18 +8,18 @@ Scaffold a plugin skeleton from collected evals or through guided discovery, the
 
 At the start of the workflow:
 
-1. Check if `hacienda-maker.json` exists in working directory
+1. Check if `hm.json` exists in working directory
 2. If exists: validate and check for `use_cases` and `evals`
 3. If missing: run guided workflow
 
 ## Evals-Based Workflow
 
-**Trigger**: `hacienda-maker.json` exists with valid `use_cases` and `evals` fields
+**Trigger**: `hm.json` exists with valid `use_cases` and `evals` fields
 
 ### Steps
 
-1. Read `hacienda-maker.json` — verify `use_cases` and `evals` fields exist
-2. Determine plugin name from `hacienda-maker.json` or ask user
+1. Read `hm.json` — verify `use_cases` and `evals` fields exist
+2. Determine plugin name from `hm.json` or ask user
 3. Create minimal skeleton:
    - `.claude-plugin/plugin.json` with `{"name": "<plugin-name>", "version": "0.1.0"}`
    - `skills/<plugin-name>/SKILL.md` with frontmatter synthesized from use cases
@@ -31,7 +31,7 @@ At the start of the workflow:
    python skills/hacienda-maker/scripts/run_evals.py --grade
    python skills/hacienda-maker/scripts/run_evals.py --score --baseline
    ```
-6. Initialize TSV log: write header row to `hacienda-maker-results.tsv`:
+6. Initialize TSV log: write header row to `hm-results.tsv`:
    ```
    iteration\tcombined_score\ttrigger_score\tfunctional_score\tdelta\tis_improvement\tcommit_sha\ttimestamp
    ```
@@ -39,7 +39,7 @@ At the start of the workflow:
 
 ## Guided Workflow
 
-**Trigger**: `hacienda-maker.json` does not exist OR has no evals
+**Trigger**: `hm.json` does not exist OR has no evals
 
 ### Steps
 
@@ -75,8 +75,8 @@ At the start of the workflow:
 
 | Condition | Behavior | User Message |
 |----------|----------|--------------|
-| `hacienda-maker.json` malformed (invalid JSON) | Abort | "hacienda-maker.json is malformed. Run /hacienda-maker:collect to regenerate." |
-| `use_cases` empty array or missing | Abort | "No use cases defined. Run /hacienda-maker:collect first." |
+| `hm.json` malformed (invalid JSON) | Abort | "hm.json is malformed. Run /hm:collect to regenerate." |
+| `use_cases` empty array or missing | Abort | "No use cases defined. Run /hm:collect first." |
 | `evals` empty array | Auto-generate from use cases | (proceed silently) |
 | User skips all discovery questions | Create minimal plugin | "Creating minimal plugin with default skill." |
 | Validation fails after scaffolding | Print errors, stop | (show validation errors) |

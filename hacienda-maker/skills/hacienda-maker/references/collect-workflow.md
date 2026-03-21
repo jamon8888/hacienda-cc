@@ -16,7 +16,7 @@ Capture use cases from the user and generate eval files via the eval-generator a
    trigger_output_path: evals/trigger-eval.json
    functional_output_path: evals/evals.json
    ```
-6. Write `hacienda-maker.json` (create if missing):
+6. Write `hm.json` (create if missing):
    - Set `use_cases` field to collected list
    - Set `evals.trigger_path` to `evals/trigger-eval.json`
    - Set `evals.functional_path` to `evals/evals.json`
