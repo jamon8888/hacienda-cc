@@ -19,6 +19,24 @@ def write_state(cwd: Path, state: dict):
     (cwd / "hacienda-maker.json").write_text(json.dumps(state, indent=2))
 
 
+def write_failed_grading(output_path: Path, entry: dict, reason: str):
+    expectations = entry.get("expectations", [])
+    results = [{"text": e.get("text", ""), "type": e.get("type", "contains"),
+                "grader_type": "llm" if e.get("type") == "semantic" else "deterministic",
+                "passed": False, "evidence": reason}
+               for e in expectations]
+    total = len(results)
+    grading = {
+        "eval_id": entry["eval_id"],
+        "run_id": f"run-{entry['run_n']}",
+        "transcript_path": entry["transcript_path"],
+        "expectations": results,
+        "summary": {"passed": 0, "failed": total, "total": total, "pass_rate": 0.0}
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(grading, indent=2))
+
+
 def safe_pass_rate(grading: dict) -> float:
     summary = grading.get("summary", {})
     rate = summary.get("pass_rate")
@@ -245,16 +263,83 @@ def mode_generate_transcripts(cwd: Path):
     print(f"Transcripts: {len(transcripts_to_grade)} entries ({runs_per_eval} runs × {len(functional_evals)} evals)")
 
 
+def mode_grade(cwd: Path):
+    evals_dir = cwd / "evals"
+    ttg_path = evals_dir / "transcripts-to-grade.json"
+    if not ttg_path.exists():
+        print("Error: evals/transcripts-to-grade.json not found. Run --generate-transcripts first.", file=sys.stderr)
+        sys.exit(1)
+
+    entries = json.loads(ttg_path.read_text())
+    grader_script = Path(__file__).parent / "grader.py"
+
+    skipped = 0
+    failed = 0
+    succeeded = 0
+
+    for entry in entries:
+        output_path = cwd / entry["output_path"]
+
+        # Idempotent: skip if already graded
+        if output_path.exists():
+            try:
+                existing = json.loads(output_path.read_text())
+                if isinstance(existing.get("summary", {}).get("pass_rate"), (int, float)):
+                    skipped += 1
+                    continue
+            except (json.JSONDecodeError, KeyError):
+                pass  # re-grade if malformed
+
+        transcript_path = cwd / entry["transcript_path"]
+
+        # Missing transcript → fail all expectations
+        if not transcript_path.exists():
+            write_failed_grading(output_path, entry, "transcript missing")
+            failed += 1
+            continue
+
+        # Ensure output directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Call grader.py
+        expectations_json = json.dumps(entry.get("expectations", []))
+        try:
+            result = subprocess.run(
+                [sys.executable, str(grader_script),
+                 "--transcript", str(transcript_path),
+                 "--expectations", expectations_json,
+                 "--output", str(output_path),
+                 "--eval-id", entry["eval_id"],
+                 "--run-n", str(entry["run_n"])],
+                capture_output=True, text=True, timeout=300
+            )
+        except subprocess.TimeoutExpired:
+            write_failed_grading(output_path, entry, "grader timeout")
+            failed += 1
+            continue
+
+        if result.returncode != 0:
+            write_failed_grading(output_path, entry, "grader error")
+            failed += 1
+        else:
+            succeeded += 1
+
+    total = len(entries)
+    print(f"Graded: {total} entries ({succeeded} succeeded, {skipped} skipped, {failed} failed)")
+
+
 def main():
     args = sys.argv[1:]
     cwd = Path.cwd()
 
     if "--generate-transcripts" in args:
         mode_generate_transcripts(cwd)
+    elif "--grade" in args:
+        mode_grade(cwd)
     elif "--score" in args:
         mode_score(cwd, baseline="--baseline" in args)
     else:
-        print("Usage: run_evals.py --generate-transcripts | --score [--baseline]", file=sys.stderr)
+        print("Usage: run_evals.py --generate-transcripts | --grade | --score [--baseline]", file=sys.stderr)
         sys.exit(1)
 
 
