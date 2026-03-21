@@ -19,9 +19,13 @@ def grade_deterministic(transcript: str, expectation: dict) -> dict:
         passed = text.lower() not in transcript.lower()
         evidence = "Not present" if passed else f"Found: {text}"
     elif etype == "regex":
-        m = re.search(text, transcript)
-        passed = m is not None
-        evidence = m.group(0) if m else "No match"
+        try:
+            m = re.search(text, transcript)
+            passed = m is not None
+            evidence = m.group(0) if m else "No match"
+        except re.error as e:
+            passed = False
+            evidence = f"Invalid regex: {e}"
     elif etype == "json_valid":
         try:
             json.loads(transcript)
@@ -65,7 +69,13 @@ def grade_semantic(transcript: str, expectation: dict) -> dict:
         inner = json.loads(outer.get("result", "{}"))
         passed = bool(inner.get("passed", False))
         evidence = inner.get("evidence", "grader parse error")
-    except Exception:
+    except json.JSONDecodeError:
+        passed = False
+        evidence = "grader parse error"
+    except subprocess.TimeoutExpired:
+        passed = False
+        evidence = "grader timeout (60s)"
+    except FileNotFoundError:
         passed = False
         evidence = "grader parse error"
 
@@ -88,7 +98,10 @@ def main():
     args = parser.parse_args()
 
     transcript = Path(args.transcript).read_text()
-    expectations = json.loads(args.expectations)
+    try:
+        expectations = json.loads(args.expectations)
+    except json.JSONDecodeError as e:
+        sys.exit(f"Error: Invalid JSON in --expectations: {e}")
 
     results = []
     for exp in expectations:
