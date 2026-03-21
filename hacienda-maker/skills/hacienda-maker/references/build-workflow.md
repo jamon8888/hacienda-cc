@@ -16,7 +16,7 @@ Scaffold a minimal plugin skeleton from collected evals, then run baseline evalu
 5. Run baseline:
    ```bash
    python skills/hacienda-maker/scripts/run_evals.py --generate-transcripts
-   # dispatch grader agent for each entry in evals/transcripts-to-grade.json
+   python skills/hacienda-maker/scripts/run_evals.py --grade
    python skills/hacienda-maker/scripts/run_evals.py --score --baseline
    ```
 6. Initialize TSV log: write header row to `hacienda-maker-results.tsv`:

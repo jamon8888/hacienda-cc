@@ -9,7 +9,7 @@ git rev-parse HEAD          # record starting commit
 git status                  # confirm clean working tree
 python skills/hacienda-maker/scripts/validate_plugin.py .
 python skills/hacienda-maker/scripts/run_evals.py --generate-transcripts
-# dispatch grader agent for each entry in evals/transcripts-to-grade.json
+python skills/hacienda-maker/scripts/run_evals.py --grade
 python skills/hacienda-maker/scripts/run_evals.py --score --baseline
 ```
 
@@ -56,7 +56,7 @@ If a hook blocks the commit: discard the change (git restore), increment no_op_s
 
 ```bash
 python skills/hacienda-maker/scripts/run_evals.py --generate-transcripts
-# dispatch grader agent for each entry in evals/transcripts-to-grade.json
+python skills/hacienda-maker/scripts/run_evals.py --grade
 python skills/hacienda-maker/scripts/run_evals.py --score
 ```
 
