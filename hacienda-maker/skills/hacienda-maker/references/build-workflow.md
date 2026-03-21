@@ -2,12 +2,24 @@
 
 ## Purpose
 
-Scaffold a minimal plugin skeleton from collected evals, then run baseline evaluation.
+Scaffold a plugin skeleton from collected evals or through guided discovery, then run baseline evaluation or package.
 
-## Steps
+## Mode Detection
 
-1. Read `hacienda-maker.json` — verify `use_cases` and `evals` fields exist. If missing, abort: "Run /hacienda-maker:collect first."
-2. Determine plugin name from `hacienda-maker.json` or ask user.
+At the start of the workflow:
+
+1. Check if `hacienda-maker.json` exists in working directory
+2. If exists: validate and check for `use_cases` and `evals`
+3. If missing: run guided workflow
+
+## Evals-Based Workflow
+
+**Trigger**: `hacienda-maker.json` exists with valid `use_cases` and `evals` fields
+
+### Steps
+
+1. Read `hacienda-maker.json` — verify `use_cases` and `evals` fields exist
+2. Determine plugin name from `hacienda-maker.json` or ask user
 3. Create minimal skeleton:
    - `.claude-plugin/plugin.json` with `{"name": "<plugin-name>", "version": "0.1.0"}`
    - `skills/<plugin-name>/SKILL.md` with frontmatter synthesized from use cases
@@ -24,6 +36,50 @@ Scaffold a minimal plugin skeleton from collected evals, then run baseline evalu
    iteration\tcombined_score\ttrigger_score\tfunctional_score\tdelta\tis_improvement\tcommit_sha\ttimestamp
    ```
    Then append baseline row (iteration=0).
+
+## Guided Workflow
+
+**Trigger**: `hacienda-maker.json` does not exist OR has no evals
+
+### Steps
+
+1. **Discovery** — understand what the user wants to build:
+   - What should this plugin do?
+   - Who will use it?
+   - Does it integrate with external tools?
+
+2. **Component Planning** — determine which components are needed:
+   - Skills: domain knowledge, user-initiated actions
+   - Agents: autonomous multi-step tasks (uncommon)
+   - Hooks: event-driven automation (rare)
+   - MCP Servers: external service integration
+
+3. **Design** — clarify each component:
+   - For skills: trigger phrases, knowledge domains, reference files
+   - For MCP: server type, authentication, tools exposed
+   - Use `references/component-schemas.md` for format specs
+
+4. **Implementation** — create plugin files:
+   - Create directory structure
+   - Create `plugin.json` manifest
+   - Create each component file
+   - Create `README.md`
+
+5. **Package** — deliver the finished plugin:
+   - Validate: `python skills/hacienda-maker/scripts/validate_plugin.py <plugin-dir>`
+   - Create outputs directory: `mkdir -p ./outputs`
+   - Package: `cd <plugin-dir> && zip -r ../outputs/<name>.plugin . -x "*.DS_Store"`
+   - Present `.plugin` file to user
+
+## Error Handling
+
+| Condition | Behavior | User Message |
+|----------|----------|--------------|
+| `hacienda-maker.json` malformed (invalid JSON) | Abort | "hacienda-maker.json is malformed. Run /hacienda-maker:collect to regenerate." |
+| `use_cases` empty array or missing | Abort | "No use cases defined. Run /hacienda-maker:collect first." |
+| `evals` empty array | Auto-generate from use cases | (proceed silently) |
+| User skips all discovery questions | Create minimal plugin | "Creating minimal plugin with default skill." |
+| Validation fails after scaffolding | Print errors, stop | (show validation errors) |
 
 ## SKILL.md Description Synthesis
 
