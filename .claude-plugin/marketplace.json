@@ -1,0 +1,23 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "hacienda-cc",
+  "version": "0.1.0",
+  "description": "Hacienda Maker — autonomous plugin quality loop for Claude Code. Build, evaluate, and optimize plugins with TDD-style eval scoring.",
+  "owner": {
+    "name": "jamon8888",
+    "url": "https://github.com/jamon8888"
+  },
+  "plugins": [
+    {
+      "name": "hacienda-maker",
+      "description": "Autonomous plugin quality loop: collect use cases, generate evals, scaffold plugins, and run an optimize loop that iteratively improves trigger accuracy and functional correctness.",
+      "version": "0.1.0",
+      "author": {
+        "name": "jamon8888",
+        "url": "https://github.com/jamon8888"
+      },
+      "source": "./hacienda-maker",
+      "category": "productivity"
+    }
+  ]
+}
