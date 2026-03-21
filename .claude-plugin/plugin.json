@@ -1,4 +1,12 @@
 {
   "name": "hacienda-maker",
-  "version": "0.1.0"
+  "description": "Autonomous plugin quality loop: collect use cases, generate evals, scaffold plugins, and run an optimize loop that iteratively improves trigger accuracy and functional correctness.",
+  "version": "0.1.0",
+  "author": {
+    "name": "jamon8888",
+    "url": "https://github.com/jamon8888"
+  },
+  "repository": "https://github.com/jamon8888/hacienda-cc",
+  "license": "MIT",
+  "keywords": ["plugin", "evals", "quality", "optimization", "tdd", "grading"]
 }
