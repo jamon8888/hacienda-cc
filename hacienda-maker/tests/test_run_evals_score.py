@@ -135,3 +135,77 @@ def test_passed_evals_threshold_0_5():
         assert code == 0
         assert out["functional_detail"]["passed_evals"] == 1
         assert out["functional_detail"]["failed_evals"] == 1
+
+
+def test_best_score_updated_on_improvement():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        make_state(tmp, best_score=0.0)  # low → improvement guaranteed at 100
+        queries = [{"query": "q", "should_trigger": True, "results": [True, True, True], "pass_rate_q": 1.0}]
+        make_trigger_results(tmp, queries)
+        p = make_grading(tmp, "eval-001", 1, 1.0)
+        make_transcripts_to_grade(tmp, [
+            {"eval_id": "eval-001", "run_n": 1, "expectations": [], "transcript_path": "", "output_path": p}
+        ])
+        code, out = run_score_mode(tmp)
+        assert code == 0
+        assert out["is_improvement"] is True
+        state = json.loads((tmp / "hacienda-maker.json").read_text())
+        assert state["history"]["best_score"] == out["combined_score"], \
+            "best_score should be updated to combined_score after improvement"
+
+
+def test_best_commit_updated_on_improvement():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        make_state(tmp, best_score=0.0)
+        queries = [{"query": "q", "should_trigger": True, "results": [True, True, True], "pass_rate_q": 1.0}]
+        make_trigger_results(tmp, queries)
+        p = make_grading(tmp, "eval-001", 1, 1.0)
+        make_transcripts_to_grade(tmp, [
+            {"eval_id": "eval-001", "run_n": 1, "expectations": [], "transcript_path": "", "output_path": p}
+        ])
+        code, out = run_score_mode(tmp)
+        assert code == 0
+        assert out["is_improvement"] is True
+        state = json.loads((tmp / "hacienda-maker.json").read_text())
+        assert state["history"]["best_commit"] is not None, \
+            "best_commit should be set (not None) after improvement"
+
+
+def test_best_score_not_updated_when_no_improvement():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        make_state(tmp, best_score=99.0)  # high → delta=1 < noise_floor=2 → no improvement
+        queries = [{"query": "q", "should_trigger": True, "results": [True, True, True], "pass_rate_q": 1.0}]
+        make_trigger_results(tmp, queries)
+        p = make_grading(tmp, "eval-001", 1, 1.0)
+        make_transcripts_to_grade(tmp, [
+            {"eval_id": "eval-001", "run_n": 1, "expectations": [], "transcript_path": "", "output_path": p}
+        ])
+        code, out = run_score_mode(tmp)
+        assert code == 0
+        assert out["is_improvement"] is False
+        state = json.loads((tmp / "hacienda-maker.json").read_text())
+        assert state["history"]["best_score"] == 99.0, \
+            "best_score should NOT change when no improvement"
+
+
+def test_malformed_grading_json_returns_zero():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        make_state(tmp, best_score=0.0)
+        make_trigger_results(tmp, [])
+        grading_dir = tmp / "evals/transcripts"
+        grading_dir.mkdir(parents=True)
+        # Missing pass_rate in summary
+        malformed = {"eval_id": "eval-001", "run_id": "run-1",
+                     "summary": {"passed": 0, "failed": 0, "total": 0}}
+        (grading_dir / "eval-001-run-1-grading.json").write_text(json.dumps(malformed))
+        entries = [{"eval_id": "eval-001", "run_n": 1, "expectations": [], "transcript_path": "",
+                    "output_path": "evals/transcripts/eval-001-run-1-grading.json"}]
+        make_transcripts_to_grade(tmp, entries)
+        code, out = run_score_mode(tmp)
+        assert code == 0, "Should not crash on malformed grading.json"
+        assert out["functional_score"] == 0.0, \
+            "Malformed grading.json (missing pass_rate) should be treated as 0"

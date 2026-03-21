@@ -19,6 +19,15 @@ def write_state(cwd: Path, state: dict):
     (cwd / "hacienda-maker.json").write_text(json.dumps(state, indent=2))
 
 
+def safe_pass_rate(grading: dict) -> float:
+    summary = grading.get("summary", {})
+    rate = summary.get("pass_rate")
+    if not isinstance(rate, (int, float)):
+        print("WARNING: malformed grading.json — missing pass_rate", file=sys.stderr)
+        return 0.0
+    return float(rate)
+
+
 def mode_score(cwd: Path, baseline: bool = False):
     state = load_state(cwd)
     scoring = state["scoring"]
@@ -56,7 +65,7 @@ def mode_score(cwd: Path, baseline: bool = False):
             grading_paths.append(entry["output_path"])
             if grading_path.exists():
                 grading = json.loads(grading_path.read_text())
-                rates.append(grading["summary"]["pass_rate"])
+                rates.append(safe_pass_rate(grading))
         per_eval_medians[eval_id] = median(rates) if rates else 0.0
 
     functional_score = (sum(per_eval_medians.values()) / len(per_eval_medians) * 100) \
@@ -119,6 +128,11 @@ def mode_score(cwd: Path, baseline: bool = False):
         state["history"]["baseline_score"] = score_out["combined"]
         if state["history"]["best_score"] is None:
             state["history"]["best_score"] = score_out["combined"]
+    elif score_out["is_improvement"]:
+        state["history"]["best_score"] = score_out["combined"]
+        state["history"]["best_commit"] = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
     write_state(cwd, state)
 
     print(json.dumps(last_run, indent=2))
@@ -155,16 +169,21 @@ def mode_generate_transcripts(cwd: Path):
     query_results = {i: [] for i in range(len(trigger_evals))}
     for run_n in range(1, runs_per_eval + 1):
         for i, entry in enumerate(trigger_evals):
-            result = subprocess.run(
-                ["claude", "-p", entry["query"],
-                 "--plugin", str(cwd),
-                 "--system", system_msg],
-                capture_output=True, text=True
-            )
-            transcript = result.stdout
-            lines = transcript.strip().splitlines()
-            last_lines = lines[-3:] if len(lines) >= 3 else lines
-            triggered = any(f"SKILL_USED: {skill_name}".lower() in l.lower() for l in last_lines)
+            try:
+                result = subprocess.run(
+                    ["claude", "-p", entry["query"],
+                     "--plugin-dir", str(cwd),
+                     "--append-system-prompt", system_msg,
+                     "--output-format", "json"],
+                    capture_output=True, text=True, timeout=60
+                )
+            except subprocess.TimeoutExpired:
+                result = type("r", (), {"stdout": "", "returncode": 1, "stderr": "timeout"})()
+            try:
+                text = json.loads(result.stdout).get("result", "")
+            except (json.JSONDecodeError, AttributeError):
+                text = result.stdout
+            triggered = f"SKILL_USED: {skill_name}".lower() in text.lower()
             query_results[i].append(triggered)
 
     trigger_results_data = {
@@ -200,12 +219,15 @@ def mode_generate_transcripts(cwd: Path):
             input_files = eval_entry.get("input_files", [])
             context_flags = []
             for f in input_files:
-                context_flags += ["--context", str(cwd / f)]
+                context_flags += ["--add-dir", str(cwd / f)]
 
-            result = subprocess.run(
-                ["claude", "-p", prompt, "--plugin", str(cwd)] + context_flags,
-                capture_output=True, text=True
-            )
+            try:
+                result = subprocess.run(
+                    ["claude", "-p", prompt, "--plugin-dir", str(cwd)] + context_flags,
+                    capture_output=True, text=True, timeout=60
+                )
+            except subprocess.TimeoutExpired:
+                result = type("r", (), {"stdout": "", "returncode": 1, "stderr": "timeout"})()
             transcript_path = transcripts_dir / f"{eval_id}-run-{run_n}.md"
             transcript_path.write_text(result.stdout)
 
