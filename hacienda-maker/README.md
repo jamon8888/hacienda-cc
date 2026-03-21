@@ -3,23 +3,32 @@
 Autonomous plugin quality loop for Claude Cowork. Evaluates trigger precision and functional
 correctness, then iterates until a score threshold is reached.
 
+## Install
+
+```bash
+/plugin marketplace add hacienda-maker
+/plugin install hacienda-maker@latest
+/reload-plugins
+```
+
 ## Commands
 
 | Command | What it does |
 |---------|-------------|
-| `/hacienda-maker` | Full pipeline or resume |
-| `/hacienda-maker:collect` | Capture use cases, generate evals |
-| `/hacienda-maker:build` | Scaffold plugin skeleton, run baseline |
-| `/hacienda-maker:optimize` | Autonomous improvement loop |
-| `/hacienda-maker:convert` | Convert Claude Code plugin to Cowork |
+| `/hm` | Full pipeline or resume |
+| `/hm:collect` | Capture use cases, generate evals |
+| `/hm:build` | Scaffold plugin skeleton, run baseline |
+| `/hm:optimize` | Autonomous improvement loop |
+| `/hm:convert` | Convert Claude Code plugin to Cowork |
+| `/hm:customize` | Add or modify triggers and behaviors |
 
 ## Quick Start
 
 ```bash
 # In your target plugin directory:
-/hacienda-maker:collect   # describe what your plugin should do
-/hacienda-maker:build     # scaffold + baseline score
-/hacienda-maker:optimize  # run loop until score >= 85
+/hm:collect   # describe what your plugin should do
+/hm:build     # scaffold + baseline score
+/hm:optimize  # run loop until score >= 85
 ```
 
 ## Configuration
