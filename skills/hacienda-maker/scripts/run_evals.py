@@ -2,6 +2,7 @@
 """run_evals.py — eval orchestrator.
 Modes:
   --generate-transcripts  : run claude -p for trigger + eval prompts, write output files
+  --grade                 : call grader.py for each transcript, write grading.json files
   --score [--baseline]    : read grading.json files, compute scores, write last-run.json
 """
 import json
@@ -319,7 +320,8 @@ def mode_grade(cwd: Path):
             continue
 
         if result.returncode != 0:
-            write_failed_grading(output_path, entry, "grader error")
+            reason = f"grader error: {result.stderr[:200]}" if result.stderr else "grader error"
+            write_failed_grading(output_path, entry, reason)
             failed += 1
         else:
             succeeded += 1

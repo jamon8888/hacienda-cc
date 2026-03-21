@@ -153,7 +153,7 @@ def test_grade_handles_grader_error(tmp_path):
         run_evals.mode_grade(tmp_path)
     grading = json.loads((tmp_path / entry["output_path"]).read_text())
     assert grading["summary"]["pass_rate"] == 0.0
-    assert grading["expectations"][0]["evidence"] == "grader error"
+    assert "grader error" in grading["expectations"][0]["evidence"]
 
 
 def test_grade_timeout_writes_failed_grading(tmp_path):
