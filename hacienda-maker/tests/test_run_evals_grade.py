@@ -172,3 +172,31 @@ def test_grade_timeout_writes_failed_grading(tmp_path):
     grading = json.loads((tmp_path / entry["output_path"]).read_text())
     assert grading["summary"]["pass_rate"] == 0.0
     assert grading["expectations"][0]["evidence"] == "grader timeout"
+
+
+# === Batched semantic grading tests ===
+def test_batch_semantic_single_call():
+    """Batch semantic should call Claude once for multiple expectations."""
+    expectations = [
+        {"text": "tone is professional"},
+        {"text": "mentions GDPR"},
+    ]
+
+    mock_response = '{"result": "[{\\"idx\\": 0, \\"passed\\": true, \\"evidence\\": \\"a\\"}, {\\"idx\\": 1, \\"passed\\": false, \\"evidence\\": \\"b\\"}]"}'
+
+    with patch("run_evals.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(stdout=mock_response, returncode=0)
+        results = run_evals.grade_semantic_batch("transcript text", expectations, timeout=60)
+
+    assert len(results) == 2
+    assert results[0]["passed"] is True
+    assert results[1]["passed"] is False
+    assert results[0]["grader_type"] == "llm"
+    # Verify single subprocess call
+    assert mock_run.call_count == 1
+
+
+def test_batch_semantic_empty_expectations():
+    """Empty expectations should return empty list."""
+    results = run_evals.grade_semantic_batch("transcript", [], timeout=60)
+    assert results == []

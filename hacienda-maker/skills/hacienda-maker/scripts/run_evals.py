@@ -78,6 +78,47 @@ def generate_transcripts_parallel(entries, max_workers=4, timeout_per_entry=60,
     return results
 
 
+def build_semantic_prompt(transcript, expectations):
+    """Build prompt for semantic evaluation."""
+    exp_list = "\n".join(f"{i}. {e['text']}" for i, e in enumerate(expectations))
+    return f"""Evaluate the following transcript against each expectation.
+
+<transcript>
+{transcript}
+</transcript>
+
+<expectations>
+{exp_list}
+</expectations>
+
+For each expectation, respond with a JSON object on its own line:
+{{"idx": <number>, "passed": true|false, "evidence": "<verbatim quote or 'Not found'>"}}
+
+Respond with exactly {len(expectations)} JSON objects, one per line. No wrapping, no markdown."""
+
+
+def grade_semantic_batch(transcript, expectations, timeout=120):
+    """Grade multiple semantic expectations in one LLM call."""
+    if not expectations:
+        return []
+
+    prompt = build_semantic_prompt(transcript, expectations)
+    result = subprocess.run(
+        ["claude", "-p", prompt, "--output-format", "json"],
+        capture_output=True, text=True, timeout=timeout
+    )
+
+    try:
+        outer = json.loads(result.stdout)
+        raw = outer.get("result", result.stdout)
+    except json.JSONDecodeError:
+        raw = result.stdout
+
+    # Import parse function from inline_evaluator
+    from inline_evaluator import parse_semantic_response
+    return parse_semantic_response(raw, expectations)
+
+
 def load_state(cwd: Path) -> dict:
     return json.loads((cwd / "hm.json").read_text())
 
