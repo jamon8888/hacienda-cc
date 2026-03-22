@@ -28,9 +28,15 @@
 - Modify: `hacienda-maker/skills/hacienda-maker/scripts/grader.py`
 - Test: `hacienda-maker/tests/test_grader.py`
 
+**Existing functions in grader.py:**
+- `grade_deterministic(transcript, expectation)` - lines 11-51
+- `grade_semantic(transcript, expectation)` - lines 54-88
+- `main()` - lines 91-143
+- Basic normalization in `main()` lines 106-113 (converts string to dict)
+
 - [ ] **Step 1: Write failing tests for normalize_expectation**
 
-Add to `tests/test_grader.py`:
+Add to `tests/test_grader.py` (note: existing tests already have sys.path.insert at line 9-10):
 
 ```python
 # === Normalization tests ===
@@ -73,7 +79,7 @@ def test_normalize_all_expectations():
 ```bash
 cd hacienda-maker && pytest tests/test_grader.py -v -k normalize
 ```
-Expected: FAIL - AttributeError: module 'grader' has no attribute 'normalize_expectation'
+Expected: FAIL with `AttributeError: module 'grader' has no attribute 'normalize_expectation'` (function not yet defined)
 
 - [ ] **Step 3: Implement normalization functions**
 
@@ -180,7 +186,7 @@ def test_parse_invalid_json():
 ```bash
 cd hacienda-maker && pytest tests/test_grader.py -v -k "parse_grader"
 ```
-Expected: FAIL - AttributeError
+Expected: FAIL with `AttributeError: module 'grader' has no attribute 'parse_grader_response'` (function not yet defined)
 
 - [ ] **Step 3: Implement parse_grader_response**
 
@@ -273,11 +279,14 @@ git commit -m "fix(grader): robust JSON parsing with wrapper handling"
 
 - [ ] **Step 1: Write failing tests for check_expectation_inline**
 
-Create `tests/test_inline_evaluator.py`:
+Create `tests/test_inline_evaluator.py` with proper import path setup:
 
 ```python
+#!/usr/bin/env python3
+"""Tests for inline_evaluator.py"""
 import sys
 from pathlib import Path
+# Add scripts directory to path (same pattern as test_grader.py)
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills/hacienda-maker/scripts"))
 
 import inline_evaluator
@@ -357,7 +366,7 @@ def test_empty_transcript():
 ```bash
 cd hacienda-maker && pytest tests/test_inline_evaluator.py -v
 ```
-Expected: FAIL - ModuleNotFoundError: No module named 'inline_evaluator'
+Expected: FAIL with `ModuleNotFoundError: No module named 'inline_evaluator'` (file not yet created)
 
 - [ ] **Step 3: Create inline_evaluator.py with check_expectation_inline**
 
@@ -519,7 +528,7 @@ def test_trigger_pass_calculation():
 ```bash
 cd hacienda-maker && pytest tests/test_inline_evaluator.py -v -k trigger
 ```
-Expected: FAIL - AttributeError: 'module' has no attribute 'evaluate_trigger_inline'
+Expected: FAIL with `AttributeError: module 'inline_evaluator' has no attribute 'evaluate_trigger_inline'` (function not yet defined)
 
 - [ ] **Step 3: Implement trigger evaluation**
 
@@ -632,7 +641,7 @@ def test_parse_semantic_malformed_json():
 ```bash
 cd hacienda-maker && pytest tests/test_inline_evaluator.py -v -k "parse_semantic"
 ```
-Expected: FAIL - AttributeError
+Expected: FAIL with `AttributeError: module 'inline_evaluator' has no attribute 'parse_semantic_response'` (function not yet defined)
 
 - [ ] **Step 3: Implement parse_semantic_response**
 
@@ -710,46 +719,65 @@ git commit -m "feat(inline): add semantic response parsing with edge case handli
 - Modify: `hacienda-maker/skills/hacienda-maker/scripts/run_evals.py`
 - Test: `hacienda-maker/tests/test_run_evals.py`
 
+**Existing functions in run_evals.py:**
+- `load_state(cwd)` - reads hm.json
+- `write_state(cwd, state)`
+- `write_failed_grading(output_path, entry, reason)`
+- `safe_pass_rate(grading)`
+- `mode_score(cwd, baseline)`
+- `mode_generate_transcripts(cwd)` - sequential, uses subprocess.run
+- `mode_grade(cwd)` - sequential grading
+- `main()` - mode dispatcher
+
 - [ ] **Step 1: Write failing tests for parallel generation**
 
-Add to `tests/test_run_evals.py`:
+Add to `tests/test_run_evals.py` (note: existing tests already have sys.path.insert at line 9):
 
 ```python
+import time
+
 def test_parallel_generation_preserves_order():
     """Parallel generation must return results in input order."""
-    import tempfile
     import run_evals
+    from unittest.mock import patch, MagicMock
 
-    with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-        entries = [
-            {"prompt": "say A", "_index": 0},
-            {"prompt": "say B", "_index": 1},
-            {"prompt": "say C", "_index": 2},
-        ]
+    entries = [
+        {"prompt": "say A"},
+        {"prompt": "say B"},
+        {"prompt": "say C"},
+    ]
+
+    # Mock subprocess.run to return predictable results
+    def mock_run(cmd, **kwargs):
+        prompt = cmd[cmd.index("-p") + 1]
+        return MagicMock(stdout=f"Response for: {prompt}", returncode=0)
+
+    with patch("run_evals.subprocess.run", side_effect=mock_run):
         results = run_evals.generate_transcripts_parallel(
             entries, max_workers=2, timeout_per_entry=30, retries=0, total_timeout_budget=120
         )
-        assert len(results) == 3
-        # Verify order matches input
-        assert results[0][0]["_index"] == 0
-        assert results[1][0]["_index"] == 1
-        assert results[2][0]["_index"] == 2
+
+    assert len(results) == 3
+    # Verify order matches input order
+    assert results[0][0]["prompt"] == "say A"
+    assert results[1][0]["prompt"] == "say B"
+    assert results[2][0]["prompt"] == "say C"
 
 def test_parallel_generation_timeout_budget():
     """Budget exhausted should not hang indefinitely."""
     import run_evals
 
-    entries = [{"prompt": f"test {i}", "_index": i} for i in range(10)]
-    # Very short budget
+    start = time.time()
+    entries = [{"prompt": f"test {i}"} for i in range(10)]
+
     results = run_evals.generate_transcripts_parallel(
-        entries, max_workers=4, timeout_per_entry=5, retries=0, total_timeout_budget=1
+        entries, max_workers=4, timeout_per_entry=60, retries=0, total_timeout_budget=2
     )
-    # Should return quickly, not wait for all
+
+    elapsed = time.time() - start
+    # Should return within reasonable time of budget (not 10x timeout_per_entry)
+    assert elapsed < 10, f"Took {elapsed}s, should be under 10s with 2s budget"
     assert len(results) == 10
-    # Most should be None due to budget
-    none_count = sum(1 for _, t in results if t is None)
-    assert none_count > 0
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -757,7 +785,7 @@ def test_parallel_generation_timeout_budget():
 ```bash
 cd hacienda-maker && pytest tests/test_run_evals.py -v -k "parallel"
 ```
-Expected: FAIL - AttributeError: module has no attribute 'generate_transcripts_parallel'
+Expected: FAIL with `AttributeError: module 'run_evals' has no attribute 'generate_transcripts_parallel'` (function not yet defined)
 
 - [ ] **Step 3: Implement parallel generation**
 
@@ -835,9 +863,11 @@ git commit -m "feat(evals): add parallel transcript generation with ordering and
 - Modify: `hacienda-maker/skills/hacienda-maker/scripts/run_evals.py`
 - Test: `hacienda-maker/tests/test_run_evals.py`
 
+**Note:** This adds new functions to run_evals.py, not modifying existing ones.
+
 - [ ] **Step 1: Write failing tests for batched grading**
 
-Add to `tests/test_run_evals.py`:
+Add to `tests/test_run_evals.py` (note: patch target must be `run_evals.subprocess.run`):
 
 ```python
 def test_batch_semantic_single_call():
@@ -850,17 +880,17 @@ def test_batch_semantic_single_call():
         {"text": "mentions GDPR"},
     ]
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(
-            stdout='{"result": "[{\\"idx\\": 0, \\"passed\\": true, \\"evidence\\": \\"a\\"}, {\\"idx\\": 1, \\"passed\\": false, \\"evidence\\": \\"b\\"}]"}',
-            returncode=0
-        )
-        results = run_evals.grade_semantic_batch("transcript", expectations, timeout=60)
+    mock_response = '{"result": "[{\\"idx\\": 0, \\"passed\\": true, \\"evidence\\": \\"a\\"}, {\\"idx\\": 1, \\"passed\\": false, \\"evidence\\": \\"b\\"}]"}'
+
+    with patch("run_evals.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(stdout=mock_response, returncode=0)
+        results = run_evals.grade_semantic_batch("transcript text", expectations, timeout=60)
 
     assert len(results) == 2
     assert results[0]["passed"] is True
     assert results[1]["passed"] is False
-    # Verify single call
+    assert results[0]["grader_type"] == "llm"
+    # Verify single subprocess call
     assert mock_run.call_count == 1
 
 def test_batch_semantic_empty_expectations():
@@ -875,7 +905,7 @@ def test_batch_semantic_empty_expectations():
 ```bash
 cd hacienda-maker && pytest tests/test_run_evals.py -v -k "batch_semantic"
 ```
-Expected: FAIL - AttributeError
+Expected: FAIL with `AttributeError: module 'run_evals' has no attribute 'grade_semantic_batch'` (function not yet defined)
 
 - [ ] **Step 3: Implement batched semantic grading**
 
