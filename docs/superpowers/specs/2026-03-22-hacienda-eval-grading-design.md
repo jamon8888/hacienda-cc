@@ -105,28 +105,23 @@ Both inline and subprocess paths MUST produce JSON conforming to this exact sche
 }
 ```
 
-**Parity verification:** Integration tests MUST verify FULL structural equality:
+**Parity verification:** Integration tests MUST verify structural equality:
 
 ```python
 def assert_full_parity(inline_result: Dict, subprocess_result: Dict):
-    """Verify complete structural equality, not just passed booleans."""
+    """Verify structural equality with semantic evidence exemption."""
     import json
 
     # Serialize both to canonical JSON for comparison
     inline_json = json.dumps(inline_result, sort_keys=True, indent=2)
     sub_json = json.dumps(subprocess_result, sort_keys=True, indent=2)
 
-    assert inline_json == sub_json, (
-        f"Parity mismatch:\n"
-        f"Inline: {inline_json[:500]}...\n"
-        f"Subprocess: {sub_json[:500]}..."
-    )
-
     # Explicit field-by-field verification
     assert inline_result["eval_id"] == subprocess_result["eval_id"]
     assert inline_result["summary"]["pass_rate"] == subprocess_result["summary"]["pass_rate"]
 
-    # Evidence strings must match (not just passed booleans)
+    # Evidence strings must match for DETERMINISTIC expectations only
+    # Semantic expectations use LLM judgment which is inherently non-deterministic
     for i, (inline_exp, sub_exp) in enumerate(zip(
         inline_result["expectations"], subprocess_result["expectations"]
     )):
@@ -134,10 +129,20 @@ def assert_full_parity(inline_result: Dict, subprocess_result: Dict):
         assert inline_exp["type"] == sub_exp["type"], f"Expectation {i} type mismatch"
         assert inline_exp["grader_type"] == sub_exp["grader_type"], f"Expectation {i} grader_type mismatch"
         assert inline_exp["passed"] == sub_exp["passed"], f"Expectation {i} passed mismatch"
-        # Evidence must match for deterministic expectations
+        # Evidence must match for deterministic expectations ONLY
+        # Semantic evidence comes from LLM judgment - exempt from exact match
         if inline_exp["grader_type"] == "deterministic":
             assert inline_exp["evidence"] == sub_exp["evidence"], f"Expectation {i} evidence mismatch"
+        # For semantic: evidence must be present and non-empty, but not necessarily equal
+        elif inline_exp["grader_type"] == "llm":
+            assert inline_exp["evidence"], f"Expectation {i} missing semantic evidence"
+            assert sub_exp["evidence"], f"Expectation {i} missing semantic evidence"
 ```
+
+**Note on semantic parity:** LLM judgment is inherently non-deterministic. For semantic expectations, we verify:
+- Same `passed` boolean (should be consistent)
+- Non-empty evidence (quality check)
+- NOT exact evidence string match (would cause flaky tests)
 
 ## Component Design
 
@@ -450,15 +455,33 @@ import time
 
 def generate_transcripts_parallel(entries: List[dict], max_workers: int = 4,
                                   timeout_per_entry: int = 60,
-                                  retries: int = 2) -> List[Tuple[dict, Optional[str]]]:
-    """Generate transcripts in parallel with ordering preserved.
+                                  retries: int = 2,
+                                  total_timeout_budget: int = 600) -> List[Tuple[dict, Optional[str]]]:
+    """Generate transcripts in parallel with ordering preserved and bounded total time.
+
+    Args:
+        entries: List of eval entries to generate transcripts for
+        max_workers: Max parallel workers (default 4)
+        timeout_per_entry: Base timeout per entry in seconds (default 60)
+        retries: Max retries per entry (default 2)
+        total_timeout_budget: MAX wall-clock time for entire batch (default 600s = 10min)
 
     Returns list of (entry, transcript) tuples in same order as input entries.
+
+    Raises:
+        TimeoutError: If total_timeout_budget exceeded before all entries complete
     """
+    import time
+    start_time = time.time()
+
     def run_with_retry(entry: dict) -> Tuple[int, Optional[str]]:
         """Run transcript generation with exponential backoff retry."""
         idx = entry.get("_index", 0)
         for attempt in range(retries + 1):
+            # Check global budget before each attempt
+            if time.time() - start_time > total_timeout_budget:
+                return (idx, None)  # Budget exhausted
+
             try:
                 result = subprocess.run(
                     ["claude", "-p", entry["prompt"], "--plugin-dir", str(cwd)],
@@ -477,18 +500,33 @@ def generate_transcripts_parallel(entries: List[dict], max_workers: int = 4,
     # Add index to each entry for ordering
     indexed_entries = [{**e, "_index": i} for i, e in enumerate(entries)]
 
-    # Execute in parallel
+    # Execute in parallel with global timeout
     results = [None] * len(entries)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(run_with_retry, entry): entry for entry in indexed_entries}
+
         for future in as_completed(futures):
+            # Check budget after each completion
+            if time.time() - start_time > total_timeout_budget:
+                # Cancel remaining futures
+                for f in futures:
+                    f.cancel()
+                break
+
             idx, transcript = future.result()
             results[idx] = (entries[idx], transcript)
+
+    # Fill any remaining None with failures
+    for i in range(len(results)):
+        if results[i] is None:
+            results[i] = (entries[i], None)
 
     return results
 ```
 
 **Ordering guarantee:** Results are returned in same order as input entries using index tracking.
+
+**Budget enforcement:** `total_timeout_budget` caps wall-clock time across all parallel operations. Default 10 minutes ensures optimize loop can't run indefinitely.
 
 #### 2.2 Batched Semantic Grading
 
@@ -769,7 +807,16 @@ def run_transcript_with_timeout(entry: dict, timeout_strategy: TimeoutStrategy) 
 
 def grade_semantic_batch_with_timeout(transcript: str, expectations: List[Dict],
                                        timeout_strategy: TimeoutStrategy) -> List[Dict]:
-    """Batch semantic grading with timeout strategy applied."""
+    """Batch semantic grading with timeout strategy applied.
+
+    IMPORTANT: Expectations MUST be normalized before calling this function.
+    Normalization is done by the caller (run_evals.py) to ensure schema compliance.
+    """
+    # Pre-condition: expectations are already normalized
+    for i, exp in enumerate(expectations):
+        if "text" not in exp:
+            raise ValueError(f"Expectation {i} not normalized - missing 'text' field")
+
     def _run(timeout: int):
         prompt = build_semantic_prompt(transcript, expectations)
         return subprocess.run(
@@ -779,14 +826,14 @@ def grade_semantic_batch_with_timeout(transcript: str, expectations: List[Dict],
 
     success, result = timeout_strategy.execute(_run)
     if not success:
-        # Return all failures with timeout message
+        # Return all failures with timeout message - schema guaranteed
         return [{
-            "text": e["text"],
+            "text": exp["text"],      # Guaranteed to exist (normalized)
             "type": "semantic",
             "passed": False,
-            "evidence": result,  # Error message
+            "evidence": result,       # Error message from timeout strategy
             "grader_type": "llm"
-        } for e in expectations]
+        } for exp in expectations]
 
     return parse_semantic_response(result.stdout, expectations)
 
@@ -802,6 +849,39 @@ DEFAULT_TIMEOUTS = {
 **Inline path note:** No timeout handling needed - Claude evaluates directly within session context.
 
 ### 4. Error Handling
+
+#### 4.0 Normalization Ordering Guarantee
+
+**All expectations MUST be normalized BEFORE any grading operation:**
+
+```python
+def grade_transcript(transcript: str, raw_expectations: List) -> Dict:
+    """Grade transcript with normalization-first guarantee.
+
+    Flow:
+    1. Normalize expectations (converts strings, validates schema)
+    2. If normalization errors, return early with validation_errors
+    3. Grade with normalized expectations (schema guaranteed)
+    """
+    # Step 1: Normalize
+    expectations, errors = normalize_all_expectations(raw_expectations)
+
+    # Step 2: Early return on validation errors
+    if errors:
+        return {
+            "expectations": [],
+            "summary": {"passed": 0, "failed": 0, "total": 0, "pass_rate": 1.0},
+            "validation_errors": errors
+        }
+
+    # Step 3: Grade with guaranteed schema
+    return grade_with_partial_failure(transcript, expectations)
+```
+
+This guarantees that any grading function receives expectations with:
+- `text` field present (string)
+- `type` field present (valid enum value)
+- No unknown keys
 
 #### 4.1 Empty Expectations Edge Case
 
