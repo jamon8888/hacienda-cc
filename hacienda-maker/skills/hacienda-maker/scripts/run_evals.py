@@ -8,9 +8,74 @@ Modes:
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from statistics import median
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+def generate_transcripts_parallel(entries, max_workers=4, timeout_per_entry=60,
+                                   retries=2, total_timeout_budget=600, cwd=None):
+    """Generate transcripts in parallel with ordering preserved and bounded total time."""
+    cwd = cwd or Path.cwd()
+    start_time = time.time()
+
+    def run_single(entry):
+        idx = entry.get("_index", 0)
+        # Check budget before starting
+        if time.time() - start_time > total_timeout_budget:
+            return (idx, None)
+        for attempt in range(retries + 1):
+            if time.time() - start_time > total_timeout_budget:
+                return (idx, None)
+            try:
+                result = subprocess.run(
+                    ["claude", "-p", entry["prompt"], "--plugin-dir", str(cwd)],
+                    capture_output=True, text=True,
+                    timeout=min(timeout_per_entry * (attempt + 1),
+                                max(1, total_timeout_budget - (time.time() - start_time)))
+                )
+                return (idx, result.stdout)
+            except subprocess.TimeoutExpired:
+                if attempt == retries:
+                    return (idx, None)
+                time.sleep(2 ** attempt)
+            except Exception:
+                return (idx, None)
+        return (idx, None)
+
+    indexed = [{**e, "_index": i} for i, e in enumerate(entries)]
+    results = [None] * len(entries)
+
+    # Don't start new tasks if budget already exhausted
+    budget_exhausted = False
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        for e in indexed:
+            if time.time() - start_time > total_timeout_budget:
+                budget_exhausted = True
+                break
+            futures[executor.submit(run_single, e)] = e
+
+        # Collect results with budget check
+        for future in as_completed(futures):
+            if time.time() - start_time > total_timeout_budget:
+                budget_exhausted = True
+                break
+            try:
+                idx, transcript = future.result(timeout=1)
+                results[idx] = (entries[idx], transcript)
+            except Exception:
+                pass  # Will be filled with None below
+
+    # Fill in any missing results
+    for i in range(len(results)):
+        if results[i] is None:
+            results[i] = (entries[i], None)
+
+    return results
 
 
 def load_state(cwd: Path) -> dict:

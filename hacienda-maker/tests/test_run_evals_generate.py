@@ -203,3 +203,53 @@ def test_trigger_detection_uses_json_result_field(tmp_path):
     q = next(q for q in tr["queries"] if q["query"] == "run my skill")
     assert q["pass_rate_q"] == 1.0, \
         "Should detect SKILL_USED in full JSON result field even if not in last 3 lines of raw text"
+
+
+# === Parallel generation tests ===
+import time
+
+
+def test_parallel_generation_preserves_order():
+    """Parallel generation must return results in input order."""
+    entries = [
+        {"prompt": "say A"},
+        {"prompt": "say B"},
+        {"prompt": "say C"},
+    ]
+
+    # Mock subprocess.run to return predictable results
+    def mock_run(cmd, **kwargs):
+        prompt = cmd[cmd.index("-p") + 1]
+        return MagicMock(stdout=f"Response for: {prompt}", returncode=0)
+
+    with patch("run_evals.subprocess.run", side_effect=mock_run):
+        results = run_evals.generate_transcripts_parallel(
+            entries, max_workers=2, timeout_per_entry=30, retries=0, total_timeout_budget=120
+        )
+
+    assert len(results) == 3
+    # Verify order matches input order
+    assert results[0][0]["prompt"] == "say A"
+    assert results[1][0]["prompt"] == "say B"
+    assert results[2][0]["prompt"] == "say C"
+
+
+def test_parallel_generation_timeout_budget():
+    """Budget exhausted should not hang indefinitely."""
+    start = time.time()
+    entries = [{"prompt": f"test {i}"} for i in range(10)]
+
+    # Mock subprocess to simulate slow responses
+    def slow_mock(cmd, **kwargs):
+        time.sleep(0.5)  # Simulate 0.5s per call
+        return MagicMock(stdout="response", returncode=0)
+
+    with patch("run_evals.subprocess.run", side_effect=slow_mock):
+        results = run_evals.generate_transcripts_parallel(
+            entries, max_workers=4, timeout_per_entry=60, retries=0, total_timeout_budget=2
+        )
+
+    elapsed = time.time() - start
+    # Should return within reasonable time of budget (not 10x timeout_per_entry)
+    assert elapsed < 10, f"Took {elapsed}s, should be under 10s with 2s budget"
+    assert len(results) == 10
