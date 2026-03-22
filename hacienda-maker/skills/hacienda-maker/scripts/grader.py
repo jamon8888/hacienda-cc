@@ -8,6 +8,47 @@ import sys
 from pathlib import Path
 
 
+VALID_EXPECTATION_TYPES = {"contains", "not_contains", "regex", "json_valid", "max_words", "semantic"}
+TEXT_KEY_ALIASES = {"text", "pattern", "regex", "value", "expectation", "query"}
+
+
+def normalize_expectation(exp):
+    """Convert any expectation format to canonical dict."""
+    if isinstance(exp, str):
+        return {"text": exp, "type": "contains"}
+    if isinstance(exp, dict):
+        result = exp.copy()
+        text_value = None
+        for key in TEXT_KEY_ALIASES:
+            if key in result:
+                text_value = result.pop(key)
+                break
+        if text_value is None:
+            raise ValueError(f"Expectation missing text field: {exp}")
+        if not isinstance(text_value, str):
+            text_value = str(text_value)
+        result["text"] = text_value
+        result.setdefault("type", "contains")
+        if result["type"] not in VALID_EXPECTATION_TYPES:
+            raise ValueError(f"Invalid expectation type '{result['type']}'")
+        result.pop("grader_type", None)
+        result.pop("passed", None)
+        result.pop("evidence", None)
+        return result
+    raise ValueError(f"Expectation must be string or dict, got {type(exp).__name__}")
+
+
+def normalize_all_expectations(expectations):
+    """Normalize all expectations, returning (valid_list, error_list)."""
+    valid, errors = [], []
+    for i, exp in enumerate(expectations):
+        try:
+            valid.append(normalize_expectation(exp))
+        except ValueError as e:
+            errors.append(f"Expectation {i}: {e}")
+    return valid, errors
+
+
 def grade_deterministic(transcript: str, expectation: dict) -> dict:
     text = expectation["text"]
     etype = expectation.get("type", "contains")

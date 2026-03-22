@@ -11,6 +11,46 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "skills/hacienda-maker/scr
 import grader
 
 
+# === Normalization tests ===
+def test_normalize_string_expectation():
+    import grader
+    result = grader.normalize_expectation("GDPR compliance")
+    assert result == {"text": "GDPR compliance", "type": "contains"}
+
+
+def test_normalize_dict_expectation():
+    import grader
+    result = grader.normalize_expectation({"text": "check this"})
+    assert result == {"text": "check this", "type": "contains"}
+
+
+def test_normalize_alternative_keys():
+    import grader
+    assert grader.normalize_expectation({"pattern": "test"})["text"] == "test"
+    assert grader.normalize_expectation({"regex": r"\d+"})["text"] == r"\d+"
+    assert grader.normalize_expectation({"value": "x"})["text"] == "x"
+
+
+def test_normalize_missing_text_raises():
+    import grader, pytest
+    with pytest.raises(ValueError, match="text"):
+        grader.normalize_expectation({"type": "contains"})
+
+
+def test_normalize_invalid_type_raises():
+    import grader, pytest
+    with pytest.raises(ValueError, match="Invalid expectation type"):
+        grader.normalize_expectation({"text": "x", "type": "fuzzy"})
+
+
+def test_normalize_all_expectations():
+    import grader
+    expectations = ["str", {"text": "dict"}, {"type": "missing"}]
+    valid, errors = grader.normalize_all_expectations(expectations)
+    assert len(valid) == 2
+    assert len(errors) == 1
+
+
 # --- contains ---
 def test_contains_passes():
     result = grader.grade_deterministic("Hello GDPR world", {"text": "gdpr", "type": "contains"})
