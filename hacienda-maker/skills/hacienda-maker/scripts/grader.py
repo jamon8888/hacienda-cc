@@ -49,6 +49,24 @@ def normalize_all_expectations(expectations):
     return valid, errors
 
 
+def parse_grader_response(raw):
+    """Parse grader response with validation. Handles wrapped and unwrapped formats."""
+    try:
+        outer = json.loads(raw)
+        if isinstance(outer, dict) and "result" in outer:
+            inner_raw = outer["result"]
+            inner = json.loads(inner_raw) if isinstance(inner_raw, str) else inner_raw
+        else:
+            inner = outer
+        if "passed" not in inner:
+            return {"passed": False, "evidence": "Missing 'passed' field"}
+        inner["passed"] = bool(inner.get("passed", False))
+        inner.setdefault("evidence", "No evidence provided")
+        return inner
+    except json.JSONDecodeError as e:
+        return {"passed": False, "evidence": f"JSON parse error: {e}"}
+
+
 def grade_deterministic(transcript: str, expectation: dict) -> dict:
     text = expectation["text"]
     etype = expectation.get("type", "contains")
@@ -97,28 +115,23 @@ def grade_semantic(transcript: str, expectation: dict) -> dict:
     prompt = (
         f"Transcript:\n{transcript}\n\n"
         f'Expectation: "{text}"\n\n'
-        f"Est-ce que le transcript satisfait cette expectation ?\n"
-        f'Réponds en JSON strict : {{"passed": true|false, "evidence": '
-        f'"citation verbatim du transcript, ou \'Not found\' si absent"}}'
+        f"Does the transcript satisfy this expectation?\n"
+        f'Respond in JSON: {{"passed": true|false, "evidence": "quote or Not found"}}'
     )
     try:
         result = subprocess.run(
             ["claude", "-p", prompt, "--output-format", "json", "--print"],
             capture_output=True, text=True, timeout=60,
         )
-        outer = json.loads(result.stdout)
-        inner = json.loads(outer.get("result", "{}"))
-        passed = bool(inner.get("passed", False))
+        inner = parse_grader_response(result.stdout)
+        passed = inner.get("passed", False)
         evidence = inner.get("evidence", "grader parse error")
-    except json.JSONDecodeError:
-        passed = False
-        evidence = "grader parse error"
     except subprocess.TimeoutExpired:
         passed = False
         evidence = "grader timeout (60s)"
     except FileNotFoundError:
         passed = False
-        evidence = "grader parse error"
+        evidence = "grader error"
 
     return {
         "text": text,

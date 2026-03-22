@@ -147,7 +147,39 @@ def test_semantic_parse_error_returns_false():
     with patch("subprocess.run", return_value=fake):
         result = grader.grade_semantic("transcript", {"text": "check", "type": "semantic"})
     assert result["passed"] is False
-    assert result["evidence"] == "grader parse error"
+    assert "JSON parse error" in result["evidence"]
+
+
+# === JSON parsing tests ===
+def test_parse_wrapped_response():
+    import grader
+    raw = '{"result": "{\\"passed\\": true, \\"evidence\\": \\"found\\"}"}'
+    result = grader.parse_grader_response(raw)
+    assert result["passed"] is True
+    assert result["evidence"] == "found"
+
+
+def test_parse_unwrapped_response():
+    import grader
+    raw = '{"passed": false, "evidence": "not found"}'
+    result = grader.parse_grader_response(raw)
+    assert result["passed"] is False
+
+
+def test_parse_missing_passed_field():
+    import grader
+    raw = '{"evidence": "something"}'
+    result = grader.parse_grader_response(raw)
+    assert result["passed"] is False
+    assert "Missing" in result["evidence"]
+
+
+def test_parse_invalid_json():
+    import grader
+    raw = 'not json at all'
+    result = grader.parse_grader_response(raw)
+    assert result["passed"] is False
+    assert "JSON parse error" in result["evidence"]
 
 
 # --- end-to-end schema via CLI ---
