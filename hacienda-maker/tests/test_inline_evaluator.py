@@ -86,3 +86,36 @@ def test_empty_transcript():
     )
     assert result["passed"] is False
     assert "Empty transcript" in result["evidence"]
+
+
+# === Trigger evaluation tests ===
+def test_trigger_keyword_overlap():
+    queries = [{"query": "build a plugin", "should_trigger": True}]
+    desc = "Use when the user wants to build or create plugins"
+    result = inline_evaluator.evaluate_trigger_inline(queries, desc)
+    assert result["queries"][0]["triggered"] is True
+
+
+def test_trigger_intent_pattern():
+    queries = [{"query": "fix the bug", "should_trigger": True}]
+    desc = "Use when debugging or fixing issues"
+    result = inline_evaluator.evaluate_trigger_inline(queries, desc)
+    assert result["queries"][0]["triggered"] is True
+
+
+def test_trigger_no_match():
+    queries = [{"query": "what is the weather", "should_trigger": False}]
+    desc = "Use when building plugins"
+    result = inline_evaluator.evaluate_trigger_inline(queries, desc)
+    assert result["queries"][0]["triggered"] is False
+
+
+def test_trigger_pass_calculation():
+    queries = [
+        {"query": "build plugin", "should_trigger": True},
+        {"query": "weather today", "should_trigger": False}
+    ]
+    desc = "Use when building plugins"
+    result = inline_evaluator.evaluate_trigger_inline(queries, desc)
+    assert result["queries"][0]["pass"] is True
+    assert result["queries"][1]["pass"] is True  # didn't trigger, shouldn't trigger

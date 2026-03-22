@@ -91,3 +91,48 @@ def check_expectation_inline(transcript: str, expectation: dict) -> dict:
         "evidence": evidence,
         "grader_type": "deterministic"
     }
+
+
+INTENT_PATTERNS = [
+    (r'\b(build|create|make|generate|design|develop)\b', 'creation'),
+    (r'\b(fix|repair|debug|solve|resolve)\b', 'fixing'),
+    (r'\b(analyze|review|check|audit|inspect)\b', 'analysis'),
+    (r'\b(optimize|improve|enhance|refactor)\b', 'optimization'),
+    (r'\b(test|validate|verify|ensure)\b', 'testing'),
+]
+
+
+def matches_intent_pattern(query: str, skill_description: str) -> bool:
+    """Check if query intent matches skill purpose."""
+    query_lower = query.lower()
+    desc_lower = skill_description.lower()
+    for pattern, intent_type in INTENT_PATTERNS:
+        if re.search(pattern, query_lower):
+            # Check for intent type word OR any word from pattern in description
+            if intent_type in desc_lower:
+                return True
+            # Extract words from pattern and check if any appear (including as substrings)
+            words_in_pattern = re.findall(r'\b\w+\b', pattern)
+            for word in words_in_pattern:
+                if word in desc_lower:
+                    return True
+    return False
+
+
+def evaluate_trigger_inline(queries: list, skill_description: str) -> dict:
+    """Match queries against skill description without subprocess."""
+    stop_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'to', 'of', 'in', 'for', 'on', 'with'}
+    results = []
+    for q in queries:
+        query_words = set(q["query"].lower().split()) - stop_words
+        desc_words = set(skill_description.lower().split()) - stop_words
+        overlap = len(query_words & desc_words) / max(len(query_words), 1)
+        intent_match = matches_intent_pattern(q["query"], skill_description)
+        triggered = overlap > 0.3 or intent_match
+        results.append({
+            "query": q["query"],
+            "should_trigger": q["should_trigger"],
+            "triggered": triggered,
+            "pass": triggered == q["should_trigger"]
+        })
+    return {"queries": results, "total_queries": len(results)}
