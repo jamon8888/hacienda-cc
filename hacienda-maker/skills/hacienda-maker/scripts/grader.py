@@ -103,6 +103,15 @@ def main():
     except json.JSONDecodeError as e:
         sys.exit(f"Error: Invalid JSON in --expectations: {e}")
 
+    # Normalize expectations: convert strings to objects
+    normalized = []
+    for exp in expectations:
+        if isinstance(exp, str):
+            normalized.append({"text": exp, "type": "contains"})
+        else:
+            normalized.append(exp)
+    expectations = normalized
+
     results = []
     for exp in expectations:
         etype = exp.get("type", "contains")

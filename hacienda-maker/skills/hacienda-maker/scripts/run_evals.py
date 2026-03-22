@@ -22,10 +22,16 @@ def write_state(cwd: Path, state: dict):
 
 def write_failed_grading(output_path: Path, entry: dict, reason: str):
     expectations = entry.get("expectations", [])
-    results = [{"text": e.get("text", ""), "type": e.get("type", "contains"),
-                "grader_type": "llm" if e.get("type") == "semantic" else "deterministic",
-                "passed": False, "evidence": reason}
-               for e in expectations]
+    results = []
+    for e in expectations:
+        if isinstance(e, str):
+            results.append({"text": e, "type": "contains",
+                          "grader_type": "deterministic",
+                          "passed": False, "evidence": reason})
+        else:
+            results.append({"text": e.get("text", ""), "type": e.get("type", "contains"),
+                          "grader_type": "llm" if e.get("type") == "semantic" else "deterministic",
+                          "passed": False, "evidence": reason})
     total = len(results)
     grading = {
         "eval_id": entry["eval_id"],
