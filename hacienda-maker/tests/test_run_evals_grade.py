@@ -139,39 +139,41 @@ def test_grade_idempotent_rerun():
 
 
 def test_grade_handles_grader_error(tmp_path):
-    """When grader.py exits non-zero, write failed grading."""
-    entry = make_entry("eval-001", 1, [{"text": "something", "type": "contains"}])
+    """When batch semantic fails, expectations should have error evidence."""
+    entry = make_entry("eval-001", 1, [{"text": "tone is neutral", "type": "semantic"}])
     make_manifest(tmp_path, [entry])
     make_transcript(tmp_path, "eval-001", 1)
 
     def fake_run(cmd, **kwargs):
-        if "grader.py" in str(cmd):
-            return type("r", (), {"returncode": 1, "stdout": "", "stderr": "error"})()
+        # Simulate error for claude calls in batch semantic
+        if "claude" in str(cmd):
+            raise RuntimeError("LLM error")
         return subprocess.run(cmd, **kwargs)
 
     with patch("run_evals.subprocess.run", side_effect=fake_run):
         run_evals.mode_grade(tmp_path)
     grading = json.loads((tmp_path / entry["output_path"]).read_text())
     assert grading["summary"]["pass_rate"] == 0.0
-    assert "grader error" in grading["expectations"][0]["evidence"]
+    assert "Batch error" in grading["expectations"][0]["evidence"]
 
 
 def test_grade_timeout_writes_failed_grading(tmp_path):
-    """When grader.py subprocess times out, write failed grading."""
-    entry = make_entry("eval-001", 1, [{"text": "something", "type": "contains"}])
+    """When batch semantic times out, expectations should have error evidence."""
+    entry = make_entry("eval-001", 1, [{"text": "tone is neutral", "type": "semantic"}])
     make_manifest(tmp_path, [entry])
     make_transcript(tmp_path, "eval-001", 1)
 
     def fake_run(cmd, **kwargs):
-        if "grader.py" in str(cmd):
-            raise subprocess.TimeoutExpired(cmd, 300)
+        # Simulate timeout for claude calls in batch semantic
+        if "claude" in str(cmd):
+            raise subprocess.TimeoutExpired(cmd, 120)
         return subprocess.run(cmd, **kwargs)
 
     with patch("run_evals.subprocess.run", side_effect=fake_run):
         run_evals.mode_grade(tmp_path)
     grading = json.loads((tmp_path / entry["output_path"]).read_text())
     assert grading["summary"]["pass_rate"] == 0.0
-    assert grading["expectations"][0]["evidence"] == "grader timeout"
+    assert "Batch error" in grading["expectations"][0]["evidence"]
 
 
 # === Batched semantic grading tests ===

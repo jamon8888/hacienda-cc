@@ -376,7 +376,8 @@ def mode_generate_transcripts(cwd: Path):
     print(f"Transcripts: {len(transcripts_to_grade)} entries ({runs_per_eval} runs × {len(functional_evals)} evals)")
 
 
-def mode_grade(cwd: Path):
+def mode_grade(cwd: Path, batch_semantic: bool = True):
+    """Grade transcripts, optionally batching semantic expectations."""
     evals_dir = cwd / "evals"
     ttg_path = evals_dir / "transcripts-to-grade.json"
     if not ttg_path.exists():
@@ -384,11 +385,9 @@ def mode_grade(cwd: Path):
         sys.exit(1)
 
     entries = json.loads(ttg_path.read_text())
-    grader_script = Path(__file__).parent / "grader.py"
+    import grader as grader_module
 
-    skipped = 0
-    failed = 0
-    succeeded = 0
+    skipped, failed, succeeded = 0, 0, 0
 
     for entry in entries:
         output_path = cwd / entry["output_path"]
@@ -411,35 +410,65 @@ def mode_grade(cwd: Path):
             failed += 1
             continue
 
-        # Ensure output directory exists
+        transcript = transcript_path.read_text(encoding='utf-8')
+        expectations_raw = entry.get("expectations", [])
+        expectations, norm_errors = grader_module.normalize_all_expectations(expectations_raw)
+
+        if norm_errors:
+            print(f"Warning: {entry['eval_id']}: {norm_errors}", file=sys.stderr)
+
+        # Separate deterministic and semantic
+        deterministic = [e for e in expectations if e["type"] != "semantic"]
+        semantic = [e for e in expectations if e["type"] == "semantic"]
+
+        results = []
+
+        # Check deterministic inline
+        for exp in deterministic:
+            result = grader_module.grade_deterministic(transcript, exp)
+            results.append(result)
+
+        # Batch semantic if enabled and present
+        if semantic:
+            if batch_semantic:
+                try:
+                    semantic_results = grade_semantic_batch(transcript, semantic, timeout=120)
+                    results.extend(semantic_results)
+                except Exception as e:
+                    for exp in semantic:
+                        results.append({
+                            "text": exp["text"],
+                            "type": "semantic",
+                            "grader_type": "llm",
+                            "passed": False,
+                            "evidence": f"Batch error: {e}"
+                        })
+            else:
+                # Fall back to individual calls
+                for exp in semantic:
+                    result = grader_module.grade_semantic(transcript, exp)
+                    results.append(result)
+
+        passed_count = sum(1 for r in results if r["passed"])
+        total = len(results)
+        grading = {
+            "eval_id": entry["eval_id"],
+            "run_id": f"run-{entry['run_n']}",
+            "transcript_path": entry["transcript_path"],
+            "expectations": results,
+            "summary": {
+                "passed": passed_count,
+                "failed": total - passed_count,
+                "total": total,
+                "pass_rate": passed_count / total if total > 0 else 1.0
+            }
+        }
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(grading, indent=2))
+        succeeded += 1
 
-        # Call grader.py
-        expectations_json = json.dumps(entry.get("expectations", []))
-        try:
-            result = subprocess.run(
-                [sys.executable, str(grader_script),
-                 "--transcript", str(transcript_path),
-                 "--expectations", expectations_json,
-                 "--output", str(output_path),
-                 "--eval-id", entry["eval_id"],
-                 "--run-n", str(entry["run_n"])],
-                capture_output=True, text=True, timeout=300
-            )
-        except subprocess.TimeoutExpired:
-            write_failed_grading(output_path, entry, "grader timeout")
-            failed += 1
-            continue
-
-        if result.returncode != 0:
-            reason = f"grader error: {result.stderr[:200]}" if result.stderr else "grader error"
-            write_failed_grading(output_path, entry, reason)
-            failed += 1
-        else:
-            succeeded += 1
-
-    total = len(entries)
-    print(f"Graded: {total} entries ({succeeded} succeeded, {skipped} skipped, {failed} failed)")
+    print(f"Graded: {len(entries)} entries ({succeeded} succeeded, {skipped} skipped, {failed} failed)")
 
 
 def main():
