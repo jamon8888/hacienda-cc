@@ -119,3 +119,45 @@ def test_trigger_pass_calculation():
     result = inline_evaluator.evaluate_trigger_inline(queries, desc)
     assert result["queries"][0]["pass"] is True
     assert result["queries"][1]["pass"] is True  # didn't trigger, shouldn't trigger
+
+
+# === Semantic response parsing tests ===
+def test_parse_semantic_wrapped():
+    response = '{"result": "{\\"idx\\": 0, \\"passed\\": true, \\"evidence\\": \\"found\\"}"}'
+    expectations = [{"text": "check"}]
+    results = inline_evaluator.parse_semantic_response(response, expectations)
+    assert len(results) == 1
+    assert results[0]["passed"] is True
+    assert results[0]["grader_type"] == "llm"
+
+
+def test_parse_semantic_array():
+    response = '[{"idx": 0, "passed": true, "evidence": "a"}, {"idx": 1, "passed": false, "evidence": "b"}]'
+    expectations = [{"text": "a"}, {"text": "b"}]
+    results = inline_evaluator.parse_semantic_response(response, expectations)
+    assert len(results) == 2
+    assert results[0]["passed"] is True
+    assert results[1]["passed"] is False
+
+
+def test_parse_semantic_line_by_line():
+    response = '{"idx": 0, "passed": true, "evidence": "x"}\n{"idx": 1, "passed": false, "evidence": "y"}'
+    expectations = [{"text": "a"}, {"text": "b"}]
+    results = inline_evaluator.parse_semantic_response(response, expectations)
+    assert len(results) == 2
+
+
+def test_parse_semantic_missing_lines():
+    response = '{"idx": 0, "passed": true, "evidence": "x"}'
+    expectations = [{"text": "a"}, {"text": "b"}]
+    results = inline_evaluator.parse_semantic_response(response, expectations)
+    assert len(results) == 2
+    assert results[1]["evidence"] == "Missing response line"
+
+
+def test_parse_semantic_malformed_json():
+    response = 'not json\n{"idx": 1, "passed": true, "evidence": "x"}'
+    expectations = [{"text": "a"}, {"text": "b"}]
+    results = inline_evaluator.parse_semantic_response(response, expectations)
+    assert results[0]["passed"] is False
+    assert "JSON parse error" in results[0]["evidence"]

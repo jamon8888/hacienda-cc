@@ -136,3 +136,52 @@ def evaluate_trigger_inline(queries: list, skill_description: str) -> dict:
             "pass": triggered == q["should_trigger"]
         })
     return {"queries": results, "total_queries": len(results)}
+
+
+def parse_semantic_response(response: str, expectations: List[Dict]) -> List[Dict]:
+    """Parse Claude's response into structured results."""
+    raw = response.strip()
+
+    # Handle Claude CLI wrapper
+    try:
+        outer = json.loads(raw)
+        if isinstance(outer, dict) and "result" in outer:
+            raw = outer["result"]
+            if isinstance(raw, str):
+                raw = raw.strip()
+    except json.JSONDecodeError:
+        pass
+
+    # Try parsing as top-level array
+    try:
+        arr = json.loads(raw)
+        if isinstance(arr, list):
+            lines = [json.dumps(obj) for obj in arr]
+        else:
+            lines = [json.dumps(arr)]
+    except json.JSONDecodeError:
+        lines = [l.strip() for l in raw.split('\n') if l.strip()]
+
+    results = []
+    for i, exp in enumerate(expectations):
+        if i < len(lines):
+            try:
+                obj = json.loads(lines[i])
+                passed = bool(obj.get("passed", False))
+                evidence = str(obj.get("evidence", "No evidence provided"))
+            except json.JSONDecodeError as e:
+                passed = False
+                evidence = f"JSON parse error: {e}"
+        else:
+            passed = False
+            evidence = "Missing response line"
+
+        results.append({
+            "text": exp["text"],
+            "type": "semantic",
+            "passed": passed,
+            "evidence": evidence,
+            "grader_type": "llm"
+        })
+
+    return results
