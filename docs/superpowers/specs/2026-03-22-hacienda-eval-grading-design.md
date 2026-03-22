@@ -24,7 +24,7 @@ Additionally, performance is too slow:
 1. **Fix subprocess path** for reliability:
    - Robust JSON parsing with schema validation
    - Batch semantic expectations into single LLM call
-   - Parallel transcript generation
+   - Parallel transcript generation with ordering preservation
    - Retry logic with exponential backoff
 
 2. **Implement true inline evaluation** for optimize loop:
@@ -33,7 +33,7 @@ Additionally, performance is too slow:
    - Inline semantic evaluation (Claude judges its own outputs)
    - No subprocess spawning in optimize loop
 
-3. **Unified interface** - both paths produce identical JSON
+3. **Unified interface** - both paths produce identical JSON with exact schema
 
 ## Architecture
 
@@ -59,6 +59,54 @@ Additionally, performance is too slow:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## Ground-Truth Output Schema
+
+Both inline and subprocess paths MUST produce JSON conforming to this exact schema:
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GradingResult",
+  "type": "object",
+  "required": ["eval_id", "run_id", "transcript_path", "expectations", "summary"],
+  "properties": {
+    "eval_id": { "type": "string" },
+    "run_id": { "type": "string", "pattern": "^run-[0-9]+$" },
+    "transcript_path": { "type": "string" },
+    "expectations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["text", "type", "grader_type", "passed", "evidence"],
+        "properties": {
+          "text": { "type": "string" },
+          "type": { "enum": ["contains", "not_contains", "regex", "json_valid", "max_words", "semantic"] },
+          "grader_type": { "enum": ["deterministic", "llm", "error"] },
+          "passed": { "type": "boolean" },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["passed", "failed", "total", "pass_rate"],
+      "properties": {
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 },
+        "pass_rate": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "validation_errors": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
+```
+
+**Parity verification:** Integration tests MUST verify `inline_result == subprocess_result` for identical inputs.
+
 ## Component Design
 
 ### 1. Inline Evaluator (NEW)
@@ -70,17 +118,52 @@ Additionally, performance is too slow:
 Match queries against skill description without subprocess:
 
 ```python
+import re
+from typing import List, Dict
+
+# Intent patterns for common skill trigger scenarios
+INTENT_PATTERNS = [
+    (r'\b(build|create|make|generate|design|develop)\b', 'creation'),
+    (r'\b(fix|repair|debug|solve|resolve)\b', 'fixing'),
+    (r'\b(analyze|review|check|audit|inspect)\b', 'analysis'),
+    (r'\b(optimize|improve|enhance|refactor)\b', 'optimization'),
+    (r'\b(test|validate|verify|ensure)\b', 'testing'),
+]
+
+def matches_intent_pattern(query: str, skill_description: str) -> bool:
+    """Check if query intent matches skill purpose using pattern matching."""
+    query_lower = query.lower()
+    desc_lower = skill_description.lower()
+
+    for pattern, intent_type in INTENT_PATTERNS:
+        if re.search(pattern, query_lower):
+            # If query has this intent, check if description mentions it
+            if intent_type in desc_lower or re.search(pattern, desc_lower):
+                return True
+    return False
+
 def evaluate_trigger_inline(queries: list, skill_description: str) -> dict:
-    """Match queries against skill description without subprocess."""
+    """Match queries against skill description without subprocess.
+
+    Calibration: This must match existing subprocess trigger evaluation semantics.
+    Run calibration tests against trigger-eval.json results before deployment.
+    """
     results = []
     for q in queries:
         # Keyword overlap analysis
         query_words = set(q["query"].lower().split())
         desc_words = set(skill_description.lower().split())
+        # Remove common stop words for better matching
+        stop_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'to', 'of', 'in', 'for', 'on', 'with'}
+        query_words = query_words - stop_words
+        desc_words = desc_words - stop_words
+
         overlap = len(query_words & desc_words) / max(len(query_words), 1)
 
-        # Intent pattern matching (configurable patterns)
-        triggered = overlap > 0.3 or matches_intent_pattern(q["query"], skill_description)
+        # Intent pattern matching
+        intent_match = matches_intent_pattern(q["query"], skill_description)
+
+        triggered = overlap > 0.3 or intent_match
 
         results.append({
             "query": q["query"],
@@ -88,328 +171,473 @@ def evaluate_trigger_inline(queries: list, skill_description: str) -> dict:
             "triggered": triggered,
             "pass": triggered == q["should_trigger"]
         })
-    return results
+    return {"queries": results, "total_queries": len(results)}
 ```
 
-**Why this works:** Trigger evaluation is fundamentally about keyword/intent matching. No LLM needed.
+**Calibration Plan:**
+1. Run existing subprocess trigger evaluation on baseline plugin
+2. Run inline trigger evaluation on same plugin
+3. Compare pass rates - must be within 5% variance
+4. Adjust overlap threshold (currently 0.3) if needed
+5. Document any intentional semantic differences
 
 #### 1.2 Deterministic Expectations (Inline)
 
 String/regex operations without subprocess:
 
 ```python
+import json
+import re
+from typing import Dict, Tuple
+
 def check_expectation_inline(transcript: str, expectation: dict) -> dict:
-    """Check expectation without subprocess."""
+    """Check expectation without subprocess.
+
+    Handles edge cases:
+    - Empty transcript: all expectations fail
+    - Invalid regex: returns error
+    - json_valid on markdown: extracts JSON blocks first
+    - max_words: counts words properly with punctuation
+    """
+    if not transcript:
+        return {
+            "text": expectation.get("text", ""),
+            "type": expectation.get("type", "contains"),
+            "passed": False,
+            "evidence": "Empty transcript",
+            "grader_type": "deterministic"
+        }
+
     etype = expectation.get("type", "contains")
-    text = expectation["text"]
+    text = expectation.get("text", "")
 
-    if etype == "contains":
-        passed = text.lower() in transcript.lower()
-    elif etype == "not_contains":
-        passed = text.lower() not in transcript.lower()
-    elif etype == "regex":
-        passed = re.search(text, transcript) is not None
-    elif etype == "json_valid":
-        try: json.loads(transcript); passed = True
-        except: passed = False
-    elif etype == "max_words":
-        passed = len(transcript.split()) <= int(text)
-    else:
-        raise ValueError(f"Unknown type: {etype}")
+    try:
+        if etype == "contains":
+            passed = text.lower() in transcript.lower()
+            evidence = text if passed else "Not found"
 
-    return {"text": text, "type": etype, "passed": passed,
-            "evidence": text if passed else "Not found",
-            "grader_type": "deterministic"}
+        elif etype == "not_contains":
+            passed = text.lower() not in transcript.lower()
+            evidence = "Not present" if passed else f"Found: {text}"
+
+        elif etype == "regex":
+            try:
+                pattern = re.compile(text, re.IGNORECASE | re.MULTILINE)
+                match = pattern.search(transcript)
+                passed = match is not None
+                evidence = match.group(0) if match else "No match"
+            except re.error as e:
+                passed = False
+                evidence = f"Invalid regex: {e}"
+
+        elif etype == "json_valid":
+            # Handle markdown code blocks: extract JSON from ```json ... ```
+            json_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', transcript)
+            content_to_check = json_match.group(1).strip() if json_match else transcript
+            try:
+                json.loads(content_to_check)
+                passed = True
+                evidence = "Valid JSON"
+            except json.JSONDecodeError as e:
+                passed = False
+                evidence = f"Invalid JSON: {e}"
+
+        elif etype == "max_words":
+            # Proper word counting with Unicode support
+            import unicodedata
+            # Normalize and split on whitespace
+            words = transcript.split()
+            # Filter empty strings from multiple spaces
+            words = [w for w in words if w]
+            word_count = len(words)
+            limit = int(text)
+            passed = word_count <= limit
+            evidence = f"{word_count} words (limit: {limit})"
+
+        else:
+            passed = False
+            evidence = f"Unknown expectation type: {etype}"
+
+    except Exception as e:
+        passed = False
+        evidence = f"Error: {e}"
+
+    return {
+        "text": text,
+        "type": etype,
+        "passed": passed,
+        "evidence": evidence,
+        "grader_type": "deterministic"
+    }
 ```
 
 #### 1.3 Semantic Expectations (Inline)
 
-Claude evaluates within the current session. The optimize loop already runs in Claude. Instead of spawning a subprocess to ask "does this meet the expectation?", Claude judges directly.
+Claude evaluates within the current session with structured output contract:
 
-**Protocol (in SKILL.md):**
+**Prompt Construction:**
 
-```markdown
-## Inline Semantic Evaluation Protocol
+```python
+def build_semantic_prompt(transcript: str, expectations: List[Dict]) -> str:
+    """Build prompt for inline semantic evaluation."""
+    exp_list = "\n".join(f"{i}. {e['text']}" for i, e in enumerate(expectations))
+    return f"""Evaluate the following transcript against each expectation.
 
-When running inline evaluation for semantic expectations:
+<transcript>
+{transcript}
+</transcript>
 
-1. Read the transcript
-2. For each semantic expectation, judge:
-   - Does the transcript satisfy the expectation?
-   - Provide verbatim evidence or "Not found"
-3. Return structured JSON with results
+<expectations>
+{exp_list}
+</expectations>
+
+For each expectation, respond with a JSON object on its own line:
+{{"idx": <number>, "passed": true|false, "evidence": "<verbatim quote or 'Not found'>"}}
+
+Requirements:
+- Evidence MUST be a verbatim quote from the transcript, or "Not found"
+- If passed is false, evidence should explain why
+- Respond with exactly {len(expectations)} JSON objects, one per line"""
+```
+
+**Output Parsing Contract:**
+
+```python
+def parse_semantic_response(response: str, expectations: List[Dict]) -> List[Dict]:
+    """Parse Claude's response into structured results.
+
+    MUST return exactly len(expectations) results.
+    Handles: malformed JSON, missing fields, wrong count.
+    """
+    results = []
+    lines = [l.strip() for l in response.strip().split('\n') if l.strip()]
+
+    for i, exp in enumerate(expectations):
+        if i < len(lines):
+            try:
+                obj = json.loads(lines[i])
+                idx = obj.get("idx", i)
+                passed = bool(obj.get("passed", False))
+                evidence = str(obj.get("evidence", "No evidence provided"))
+                # Validate idx matches
+                if idx != i:
+                    evidence = f"idx mismatch: expected {i}, got {idx}"
+            except json.JSONDecodeError as e:
+                passed = False
+                evidence = f"JSON parse error: {e}"
+        else:
+            passed = False
+            evidence = "Missing response line"
+
+        results.append({
+            "text": exp["text"],
+            "type": "semantic",
+            "passed": passed,
+            "evidence": evidence,
+            "grader_type": "llm"
+        })
+
+    return results
 ```
 
 ### 2. Subprocess Path Fixes
 
 #### 2.1 Parallel Transcript Generation
 
-Use `concurrent.futures.ThreadPoolExecutor` for parallel processing:
+Use `concurrent.futures.ThreadPoolExecutor` with ordering preservation:
 
 ```python
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Tuple, Optional
+import time
 
-def generate_transcripts_parallel(entries: list, max_workers: int = 4) -> list:
-    """Generate transcripts in parallel."""
-    results = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(run_claude, entry): entry
-            for entry in entries
-        }
-        for future in as_completed(futures):
-            entry = futures[future]
+def generate_transcripts_parallel(entries: List[dict], max_workers: int = 4,
+                                  timeout_per_entry: int = 60,
+                                  retries: int = 2) -> List[Tuple[dict, Optional[str]]]:
+    """Generate transcripts in parallel with ordering preserved.
+
+    Returns list of (entry, transcript) tuples in same order as input entries.
+    """
+    def run_with_retry(entry: dict) -> Tuple[int, Optional[str]]:
+        """Run transcript generation with exponential backoff retry."""
+        idx = entry.get("_index", 0)
+        for attempt in range(retries + 1):
             try:
-                transcript = future.result(timeout=60)
-                results.append((entry, transcript))
-            except TimeoutError:
-                results.append((entry, None))  # Handle gracefully
+                result = subprocess.run(
+                    ["claude", "-p", entry["prompt"], "--plugin-dir", str(cwd)],
+                    capture_output=True, text=True,
+                    timeout=timeout_per_entry * (attempt + 1)
+                )
+                return (idx, result.stdout)
+            except subprocess.TimeoutExpired:
+                if attempt == retries:
+                    return (idx, None)
+                time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+            except Exception as e:
+                return (idx, None)
+        return (idx, None)
+
+    # Add index to each entry for ordering
+    indexed_entries = [{**e, "_index": i} for i, e in enumerate(entries)]
+
+    # Execute in parallel
+    results = [None] * len(entries)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(run_with_retry, entry): entry for entry in indexed_entries}
+        for future in as_completed(futures):
+            idx, transcript = future.result()
+            results[idx] = (entries[idx], transcript)
+
     return results
 ```
 
-**Speedup:** 4 workers = ~4x faster for transcript generation phase.
+**Ordering guarantee:** Results are returned in same order as input entries using index tracking.
 
 #### 2.2 Batched Semantic Grading
 
-Batch all semantic expectations into single LLM call instead of one spawn per expectation:
+Batch all semantic expectations into single LLM call with exact output format:
 
 ```python
-def grade_semantic_batch(transcript: str, expectations: list) -> list:
-    """Grade multiple semantic expectations in one LLM call."""
+def grade_semantic_batch(transcript: str, expectations: List[Dict],
+                        timeout: int = 120) -> List[Dict]:
+    """Grade multiple semantic expectations in one LLM call.
+
+    Output format is EXACTLY one JSON object per line, no wrapping.
+    """
+    if not expectations:
+        return []
+
     exp_list = "\n".join(f"{i}. {e['text']}" for i, e in enumerate(expectations))
-    prompt = f"""Transcript:
+    prompt = f"""Evaluate the following transcript against each expectation.
+
+<transcript>
 {transcript}
+</transcript>
 
-Expectations to evaluate:
+<expectations>
 {exp_list}
+</expectations>
 
-For each expectation, respond with JSON array:
-[{{"idx": 0, "passed": true, "evidence": "quote"}}, ...]"""
+For each expectation, respond with a JSON object on its own line:
+{{"idx": <number>, "passed": true|false, "evidence": "<verbatim quote or 'Not found'>"}}
 
-    result = subprocess.run(["claude", "-p", prompt, "--output-format", "json"],
-                           capture_output=True, text=True, timeout=120)
-    # Parse and return results
+Respond with exactly {len(expectations)} JSON objects, one per line. No wrapping, no markdown."""
+
+    result = subprocess.run(
+        ["claude", "-p", prompt, "--output-format", "json"],
+        capture_output=True, text=True, timeout=timeout
+    )
+
+    # Parse response - NO double decode
+    try:
+        # Claude CLI with --output-format json wraps in {"result": "..."}
+        outer = json.loads(result.stdout)
+        raw_response = outer.get("result", result.stdout)
+    except json.JSONDecodeError:
+        raw_response = result.stdout
+
+    # Parse each line as separate JSON object
+    return parse_semantic_response(raw_response, expectations)
 ```
 
-**Speedup:** If 5 semantic expectations → 5x fewer Claude spawns.
+**Key fix:** Single decode path, explicit format specification in prompt.
 
 #### 2.3 Robust JSON Parsing
 
 Schema validation with clear error messages:
 
 ```python
-def parse_grader_response(raw: str) -> dict:
-    """Parse grader response with validation."""
+import json
+from typing import Dict, Any, Optional
+
+def parse_grader_response(raw: str) -> Dict[str, Any]:
+    """Parse grader response with validation.
+
+    Handles both wrapped (Claude CLI output) and unwrapped formats.
+    Returns validated dict or error dict.
+    """
     try:
         outer = json.loads(raw)
-        # Handle both wrapped and unwrapped formats
-        inner_raw = outer.get("result", raw) if isinstance(outer, dict) else raw
-        inner = json.loads(inner_raw) if isinstance(inner_raw, str) else inner_raw
+
+        # Handle Claude CLI wrapped format: {"result": "{...}"}
+        if isinstance(outer, dict) and "result" in outer:
+            inner_raw = outer["result"]
+            inner = json.loads(inner_raw) if isinstance(inner_raw, str) else inner_raw
+        else:
+            inner = outer
 
         # Validate required fields
         if "passed" not in inner:
-            raise ValueError("Missing 'passed' field")
+            return {"passed": False, "evidence": "Missing 'passed' field in response"}
+
+        # Ensure boolean
+        inner["passed"] = bool(inner.get("passed", False))
+
+        # Ensure evidence exists
+        inner.setdefault("evidence", "No evidence provided")
+
         return inner
+
     except json.JSONDecodeError as e:
         return {"passed": False, "evidence": f"JSON parse error: {e}"}
 ```
 
 #### 2.4 Expectation Format Normalization
 
-Normalize early, validate schema:
+Normalize early, validate schema, preserve compatibility:
 
 ```python
-EXPECTATION_SCHEMA = {
-    "text": str,
-    "type": str,  # contains|not_contains|regex|json_valid|max_words|semantic
-}
+from typing import Union, Dict, List, Tuple
 
-def normalize_expectation(exp) -> dict:
-    """Convert any expectation format to canonical dict."""
+VALID_EXPECTATION_TYPES = {"contains", "not_contains", "regex", "json_valid", "max_words", "semantic"}
+
+def normalize_expectation(exp: Union[str, Dict]) -> Dict:
+    """Convert any expectation format to canonical dict.
+
+    Maintains backward compatibility with string expectations.
+    """
     if isinstance(exp, str):
         return {"text": exp, "type": "contains"}
     if isinstance(exp, dict):
-        # Validate required fields
         if "text" not in exp:
-            raise ValueError(f"Expectation missing 'text': {exp}")
+            raise ValueError(f"Expectation missing required 'text' field: {exp}")
         exp.setdefault("type", "contains")
-        return exp
-    raise ValueError(f"Invalid expectation type: {type(exp)}")
+        if exp["type"] not in VALID_EXPECTATION_TYPES:
+            raise ValueError(f"Invalid expectation type '{exp['type']}': {exp}")
+        return exp.copy()
+    raise ValueError(f"Expectation must be string or dict, got {type(exp).__name__}")
+
+def normalize_all_expectations(expectations: List) -> Tuple[List[Dict], List[str]]:
+    """Normalize all expectations, returning (valid_list, error_list)."""
+    valid = []
+    errors = []
+    for i, exp in enumerate(expectations):
+        try:
+            valid.append(normalize_expectation(exp))
+        except ValueError as e:
+            errors.append(f"Expectation {i}: {e}")
+    return valid, errors
 ```
 
 ### 3. Unified Interface
 
-#### 3.1 Shared Output Schema
-
-Both inline and subprocess paths produce identical JSON:
-
-```json
-{
-  "eval_id": "eval-001",
-  "run_id": "run-1",
-  "transcript_path": "evals/transcripts/eval-001-run-1.md",
-  "expectations": [
-    {
-      "text": "GDPR compliance",
-      "type": "contains",
-      "grader_type": "deterministic",
-      "passed": true,
-      "evidence": "GDPR compliance"
-    },
-    {
-      "text": "tone is professional",
-      "type": "semantic",
-      "grader_type": "llm",
-      "passed": true,
-      "evidence": "The response maintains a formal..."
-    }
-  ],
-  "summary": {
-    "passed": 2,
-    "failed": 0,
-    "total": 2,
-    "pass_rate": 1.0
-  }
-}
-```
-
-#### 3.2 Evaluator Interface
+#### 3.1 Evaluator Interface
 
 ```python
 # inline_evaluator.py
 class InlineEvaluator:
     """Evaluate plugins within current Claude session."""
 
-    def evaluate_trigger(self, queries: list, skill_description: str) -> dict:
-        """Inline trigger evaluation."""
+    def __init__(self, config: Dict = None):
+        self.config = config or {}
+        self.trigger_threshold = self.config.get("trigger_threshold", 0.3)
+
+    def evaluate_trigger(self, queries: List[Dict], skill_description: str) -> Dict:
+        """Inline trigger evaluation.
+
+        Args:
+            queries: List of {"query": str, "should_trigger": bool}
+            skill_description: SKILL.md description text
+
+        Returns:
+            {"queries": [...], "total_queries": int, "trigger_score": float}
+        """
         ...
 
-    def evaluate_functional(self, evals: list) -> dict:
-        """Inline functional evaluation."""
+    def evaluate_functional(self, evals: List[Dict]) -> Dict:
+        """Inline functional evaluation.
+
+        Args:
+            evals: List of {"id": str, "prompt": str, "expectations": [...]}
+
+        Returns:
+            {"evals": [...], "functional_score": float}
+        """
         ...
 
-    def compute_score(self, trigger_result: dict, functional_result: dict,
-                      weights: dict) -> dict:
-        """Compute combined score."""
+    def compute_score(self, trigger_result: Dict, functional_result: Dict,
+                      weights: Dict) -> Dict:
+        """Compute combined score.
+
+        Args:
+            trigger_result: Output from evaluate_trigger
+            functional_result: Output from evaluate_functional
+            weights: {"trigger": float, "functional": float}
+
+        Returns:
+            {"combined": float, "delta": float, "is_improvement": bool}
+        """
         ...
-
-# run_evals.py (updated)
-def mode_generate_transcripts(cwd: Path, parallel: bool = True, workers: int = 4):
-    """Generate transcripts (optionally parallel)."""
-    ...
-
-def mode_grade(cwd: Path, batch_semantic: bool = True):
-    """Grade transcripts (optionally batch semantic)."""
-    ...
 ```
 
-#### 3.3 Optimize Loop Integration
-
-```markdown
-## Phase 5: Evaluate (Updated)
-
-Choose evaluation path based on context:
-
-**Inline Path** (default for optimize loop):
-1. Call InlineEvaluator methods directly
-2. No subprocess spawns
-3. Results available immediately
-
-**Subprocess Path** (fallback/debug):
-1. Call run_evals.py --generate-transcripts --parallel
-2. Call run_evals.py --grade --batch-semantic
-3. Call run_evals.py --score
-```
-
-### 4. Error Handling
-
-#### 4.1 Timeout Handling
+#### 3.2 Timeout Integration
 
 ```python
+import time
+from typing import Callable, TypeVar, Tuple
+
+T = TypeVar('T')
+
 class TimeoutStrategy:
-    """Graceful timeout handling with configurable retries."""
+    """Graceful timeout handling with configurable retries.
+
+    Usage:
+        timeout = TimeoutStrategy(timeout=60, retries=2)
+        success, result = timeout.execute(run_transcript_generation, entry)
+    """
 
     def __init__(self, timeout: int = 60, retries: int = 2):
         self.timeout = timeout
         self.retries = retries
+        self.total_timeout_budget = timeout * (2 ** retries - 1)  # Geometric series
 
-    def execute_with_retry(self, func, *args) -> tuple[bool, str]:
-        """Execute with exponential backoff retry."""
+    def execute(self, func: Callable[..., T], *args) -> Tuple[bool, T]:
+        """Execute with exponential backoff retry.
+
+        Returns: (success, result_or_error_message)
+        """
+        last_error = None
         for attempt in range(self.retries + 1):
             try:
-                result = func(*args, timeout=self.timeout * (attempt + 1))
+                current_timeout = self.timeout * (attempt + 1)
+                result = func(*args, timeout=current_timeout)
                 return True, result
-            except TimeoutError:
-                if attempt == self.retries:
-                    return False, f"Timeout after {self.timeout * (attempt + 1)}s"
-                time.sleep(2 ** attempt)  # Exponential backoff
-        return False, "Max retries exceeded"
+            except TimeoutError as e:
+                last_error = f"Timeout after {current_timeout}s"
+                if attempt < self.retries:
+                    time.sleep(2 ** attempt)  # 1s, 2s, 4s...
+            except Exception as e:
+                last_error = str(e)
+                break
+
+        return False, last_error or "Unknown error"
 ```
 
-**Inline path benefit:** No subprocess timeout - Claude evaluates directly.
+### 4. Error Handling
 
-#### 4.2 Malformed Input Recovery
+#### 4.1 Empty Expectations Edge Case
 
 ```python
-def safe_parse_transcript(path: Path) -> tuple[bool, str]:
-    """Read transcript with encoding handling."""
-    try:
-        content = path.read_text(encoding='utf-8')
-        return True, content
-    except UnicodeDecodeError:
-        # Try common encodings
-        for enc in ['latin-1', 'cp1252', 'utf-16']:
-            try:
-                return True, path.read_text(encoding=enc)
-            except:
-                continue
-        return False, "Unable to decode transcript"
-    except FileNotFoundError:
-        return False, "Transcript not found"
-```
+def grade_with_partial_failure(transcript: str, expectations: List[Dict]) -> Dict:
+    """Grade even if some expectations fail. Handles empty list."""
+    if not expectations:
+        return {
+            "expectations": [],
+            "summary": {
+                "passed": 0,
+                "failed": 0,
+                "total": 0,
+                "pass_rate": 1.0  # Edge case: empty = perfect pass rate
+            },
+            "validation_errors": ["Empty expectations list"]
+        }
 
-#### 4.3 Expectation Validation Errors
-
-```python
-def validate_expectations(expectations: list) -> tuple[list, list]:
-    """Validate and normalize with clear errors."""
-    errors = []
-    valid = []
-
-    for i, exp in enumerate(expectations):
-        try:
-            normalized = normalize_expectation(exp)
-            # Validate type is known
-            valid_types = {"contains", "not_contains", "regex", "json_valid", "max_words", "semantic"}
-            if normalized["type"] not in valid_types:
-                errors.append(f"Expectation {i}: unknown type '{normalized['type']}'")
-                continue
-            valid.append(normalized)
-        except ValueError as e:
-            errors.append(f"Expectation {i}: {e}")
-
-    return valid, errors
-```
-
-Output includes errors for debugging:
-```json
-{
-  "expectations": [...],
-  "validation_errors": ["Expectation 2: unknown type 'fuzzy'"]
-}
-```
-
-#### 4.4 Partial Failure Handling
-
-```python
-def grade_with_partial_failure(transcript: str, expectations: list) -> dict:
-    """Grade even if some expectations fail."""
     results = []
     failed_count = 0
 
     for exp in expectations:
         try:
-            if exp["type"] == "semantic":
+            if exp.get("type") == "semantic":
                 result = grade_semantic_single(transcript, exp)
             else:
                 result = check_expectation_inline(transcript, exp)
@@ -417,8 +645,8 @@ def grade_with_partial_failure(transcript: str, expectations: list) -> dict:
                 failed_count += 1
         except Exception as e:
             result = {
-                "text": exp["text"],
-                "type": exp["type"],
+                "text": exp.get("text", ""),
+                "type": exp.get("type", "unknown"),
                 "passed": False,
                 "evidence": f"Error: {e}",
                 "grader_type": "error"
@@ -426,13 +654,14 @@ def grade_with_partial_failure(transcript: str, expectations: list) -> dict:
             failed_count += 1
         results.append(result)
 
+    total = len(results)
     return {
         "expectations": results,
         "summary": {
-            "passed": len(results) - failed_count,
+            "passed": total - failed_count,
             "failed": failed_count,
-            "total": len(results),
-            "pass_rate": (len(results) - failed_count) / len(results)
+            "total": total,
+            "pass_rate": (total - failed_count) / total if total > 0 else 1.0
         }
     }
 ```
@@ -449,33 +678,147 @@ def grade_with_partial_failure(transcript: str, expectations: list) -> dict:
 
 ## Testing Strategy
 
-1. **Unit tests** for each component:
-   - `test_inline_evaluator.py` - Test inline trigger/expectation logic
-   - `test_grader.py` - Updated for new parsing/validation
-   - `test_run_evals.py` - Test parallel generation and batch grading
+### Unit Tests
 
-2. **Integration tests**:
-   - Run full optimize loop with inline evaluator
-   - Compare inline vs subprocess results for parity
+1. **test_inline_evaluator.py**
+   - Test trigger evaluation with known queries
+   - Test each expectation type (contains, regex, json_valid, etc.)
+   - Test edge cases: empty transcript, invalid regex, unicode
+   - Test empty expectations list
 
-3. **Performance benchmarks**:
-   - Measure time before/after for optimize loop iteration
-   - Target: < 2 minutes per iteration (down from 5-10 min)
+2. **test_grader.py** (updated)
+   - Test new parse_grader_response with various formats
+   - Test normalize_expectation with string/dict inputs
+   - Test batch semantic grading output parsing
 
-## Migration Plan
+3. **test_run_evals.py** (updated)
+   - Test parallel generation preserves ordering
+   - Test timeout strategy retry logic
+   - Test parity: inline vs subprocess results
 
-1. **Phase 1:** Add inline_evaluator.py without changing optimize loop
-2. **Phase 2:** Fix subprocess path (parallel + batched)
-3. **Phase 3:** Update optimize loop to use inline by default
-4. **Phase 4:** Remove deprecated code paths
+### Integration Tests
+
+```python
+def test_inline_subprocess_parity():
+    """Verify inline and subprocess paths produce identical results."""
+    test_plugin = load_test_plugin()
+    queries = load_trigger_queries()
+    evals = load_functional_evals()
+
+    # Run both paths
+    inline_result = run_inline_evaluation(test_plugin, queries, evals)
+    subprocess_result = run_subprocess_evaluation(test_plugin, queries, evals)
+
+    # Compare schemas
+    assert inline_result.keys() == subprocess_result.keys()
+    assert inline_result["summary"] == subprocess_result["summary"]
+
+    # Compare expectations within tolerance
+    for i, (inline_exp, sub_exp) in enumerate(zip(
+        inline_result["expectations"],
+        subprocess_result["expectations"]
+    )):
+        assert inline_exp["passed"] == sub_exp["passed"], \
+            f"Expectation {i} mismatch: inline={inline_exp['passed']}, sub={sub_exp['passed']}"
+```
+
+### Performance Benchmarks
+
+```python
+def benchmark_optimize_loop():
+    """Measure time before/after optimization."""
+    import time
+
+    # Baseline (current subprocess approach)
+    start = time.time()
+    run_subprocess_evaluation(plugin, queries, evals)
+    baseline_time = time.time() - start
+
+    # Optimized (inline approach)
+    start = time.time()
+    run_inline_evaluation(plugin, queries, evals)
+    optimized_time = time.time() - start
+
+    # Target: optimized_time < baseline_time * 0.4 (60%+ improvement)
+    assert optimized_time < baseline_time * 0.4, \
+        f"Insufficient speedup: {optimized_time}s vs {baseline_time}s baseline"
+```
+
+## Migration Plan with Acceptance Gates
+
+### Phase 1: Add inline_evaluator.py
+**Changes:**
+- Create `inline_evaluator.py` with all inline evaluation logic
+- Add unit tests for inline evaluator
+- No changes to existing optimize loop
+
+**Acceptance Gate:**
+```
+pytest tests/test_inline_evaluator.py -v
+# All tests pass
+# Code coverage > 80%
+```
+
+### Phase 2: Fix subprocess path
+**Changes:**
+- Update `run_evals.py` with parallel generation
+- Update `grader.py` with robust parsing
+- Add batch semantic grading
+
+**Acceptance Gate:**
+```
+pytest tests/test_run_evals.py tests/test_grader.py -v
+# All tests pass
+# Parity test passes (inline vs subprocess results match)
+# JSON parse failures = 0 in test suite
+```
+
+### Phase 3: Update optimize loop
+**Changes:**
+- Update `optimize-loop.md` to use inline by default
+- Add fallback to subprocess path
+
+**Acceptance Gate:**
+```
+# Run optimize loop on test plugin
+./run_optimize.sh --plugin test-plugin --iterations 3
+# All iterations complete successfully
+# Combined scores computed correctly
+# No subprocess spawns in logs (verify inline path used)
+```
+
+### Phase 4: Remove deprecated paths
+**Changes:**
+- Remove old subprocess-only code paths
+- Update documentation
+
+**Acceptance Gate:**
+```
+# Full regression suite
+pytest tests/ -v --integration
+# All tests pass
+# Performance: optimize loop time < 2 minutes
+```
+
+## Rollback Criteria
+
+If any phase fails acceptance gate:
+
+1. **Do not proceed** to next phase
+2. **Document failure** with:
+   - Test output
+   - Error messages
+   - Environment details
+3. **Fix issue** before re-attempting phase
+4. **If unfixable in 2 attempts**, escalate to human decision
 
 ## Success Metrics
 
-| Metric | Before | After |
-|--------|--------|-------|
-| JSON parse failures | Frequent | Zero |
-| Semantic grading errors | Inconsistent | Reliable |
-| Expectation format errors | Occasional | Validated early |
-| Timeout failures | No retry | 2 retries with backoff |
-| Optimize loop time | 5-10 min | < 2 min |
-| Claude spawns per iteration | ~20-50 | 0 (inline) or ~5 (parallel) |
+| Metric | Before | After | Verification |
+|--------|--------|-------|--------------|
+| JSON parse failures | Frequent | Zero | Unit tests |
+| Semantic grading errors | Inconsistent | Reliable | Parity tests |
+| Expectation format errors | Occasional | Validated early | Error tests |
+| Timeout failures | No retry | 2 retries with backoff | Timeout tests |
+| Optimize loop time | 5-10 min | < 2 min | Benchmark |
+| Claude spawns per iteration | ~20-50 | 0 (inline) or ~5 (parallel) | Log analysis |
