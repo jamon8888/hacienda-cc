@@ -55,29 +55,51 @@ If a hook blocks the commit: discard the change (git restore), increment no_op_s
 
 ## Phase 5: Evaluate (Inline)
 
-**Run evaluation directly in this session:**
+**IMPORTANT**: All evaluation happens INLINE within this session. Do NOT spawn external processes.
 
-1. **Trigger Eval**: For each query in `evals/trigger-eval.json`:
-   - Read SKILL.md description
-   - Determine if query matches skill purpose
-   - Check if result matches `should_trigger`
-   - Compute pass rate
+### 5.1 Trigger Evaluation (Inline)
 
-2. **Functional Eval**: For each eval in `evals/evals.json`:
-   - Execute the prompt (respond as the skill would)
-   - Check each expectation:
-     - "contains": verify text appears in output
-     - "semantic": judge if expectation is met
-   - Compute pass rate per eval
+For each query in `evals/trigger-eval.json`:
+1. Read SKILL.md description
+2. Use keyword overlap + intent pattern matching
+3. Determine if query matches skill purpose
+4. Check against `should_trigger` field
+5. Compute pass rate
 
-3. **Score**: 
-   ```
-   combined = trigger_score * 0.4 + functional_score * 0.6
-   delta = combined - history.best_score
-   is_improvement = delta >= noise_floor
-   ```
+**Intent patterns recognized:**
+- creation: build, create, make, generate, design, develop
+- fixing: fix, repair, debug, solve, resolve
+- analysis: analyze, review, check, audit, inspect
+- optimization: optimize, improve, enhance, refactor
+- testing: test, validate, verify, ensure
 
-### Phase 5.1: Analyze (if is_improvement = true)
+### 5.2 Functional Evaluation (Inline)
+
+For each eval in `evals/evals.json`:
+1. Read the prompt and expectations
+2. Execute the prompt (respond as the skill would)
+3. Check each expectation using inline evaluator:
+
+**Deterministic types (no LLM needed):**
+- `contains`: text appears in transcript (case-insensitive)
+- `not_contains`: text does NOT appear in transcript
+- `regex`: pattern matches transcript
+- `json_valid`: valid JSON found (including in markdown code blocks)
+- `max_words`: word count within limit
+
+**Semantic type (requires LLM):**
+- Batch multiple semantic expectations into one LLM call
+- Parse response with `parse_semantic_response`
+
+### 5.3 Score Calculation
+
+```
+combined = trigger_score * 0.4 + functional_score * 0.6
+delta = combined - history.best_score
+is_improvement = delta >= noise_floor
+```
+
+### Phase 5.4: Analyze (if is_improvement = true)
 
 Read `git diff HEAD~1` and analyze what changed. Write insight to `evals/analyzer-insight.md`:
 - What was changed
