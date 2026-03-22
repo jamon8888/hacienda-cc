@@ -105,7 +105,39 @@ Both inline and subprocess paths MUST produce JSON conforming to this exact sche
 }
 ```
 
-**Parity verification:** Integration tests MUST verify `inline_result == subprocess_result` for identical inputs.
+**Parity verification:** Integration tests MUST verify FULL structural equality:
+
+```python
+def assert_full_parity(inline_result: Dict, subprocess_result: Dict):
+    """Verify complete structural equality, not just passed booleans."""
+    import json
+
+    # Serialize both to canonical JSON for comparison
+    inline_json = json.dumps(inline_result, sort_keys=True, indent=2)
+    sub_json = json.dumps(subprocess_result, sort_keys=True, indent=2)
+
+    assert inline_json == sub_json, (
+        f"Parity mismatch:\n"
+        f"Inline: {inline_json[:500]}...\n"
+        f"Subprocess: {sub_json[:500]}..."
+    )
+
+    # Explicit field-by-field verification
+    assert inline_result["eval_id"] == subprocess_result["eval_id"]
+    assert inline_result["summary"]["pass_rate"] == subprocess_result["summary"]["pass_rate"]
+
+    # Evidence strings must match (not just passed booleans)
+    for i, (inline_exp, sub_exp) in enumerate(zip(
+        inline_result["expectations"], subprocess_result["expectations"]
+    )):
+        assert inline_exp["text"] == sub_exp["text"], f"Expectation {i} text mismatch"
+        assert inline_exp["type"] == sub_exp["type"], f"Expectation {i} type mismatch"
+        assert inline_exp["grader_type"] == sub_exp["grader_type"], f"Expectation {i} grader_type mismatch"
+        assert inline_exp["passed"] == sub_exp["passed"], f"Expectation {i} passed mismatch"
+        # Evidence must match for deterministic expectations
+        if inline_exp["grader_type"] == "deterministic":
+            assert inline_exp["evidence"] == sub_exp["evidence"], f"Expectation {i} evidence mismatch"
+```
 
 ## Component Design
 
@@ -196,8 +228,8 @@ def check_expectation_inline(transcript: str, expectation: dict) -> dict:
     Handles edge cases:
     - Empty transcript: all expectations fail
     - Invalid regex: returns error
-    - json_valid on markdown: extracts JSON blocks first
-    - max_words: counts words properly with punctuation
+    - json_valid: extracts JSON from markdown OR plain text
+    - max_words: proper word counting with punctuation normalization
     """
     if not transcript:
         return {
@@ -231,24 +263,53 @@ def check_expectation_inline(transcript: str, expectation: dict) -> dict:
                 evidence = f"Invalid regex: {e}"
 
         elif etype == "json_valid":
-            # Handle markdown code blocks: extract JSON from ```json ... ```
-            json_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', transcript)
-            content_to_check = json_match.group(1).strip() if json_match else transcript
-            try:
-                json.loads(content_to_check)
-                passed = True
-                evidence = "Valid JSON"
-            except json.JSONDecodeError as e:
-                passed = False
-                evidence = f"Invalid JSON: {e}"
+            # Try multiple JSON extraction strategies in order:
+            # 1. Markdown code block with json tag: ```json ... ```
+            # 2. Markdown code block without tag: ``` ... ```
+            # 3. Inline JSON object/array in text: {...} or [...]
+            # 4. Entire transcript as JSON
+
+            json_patterns = [
+                r'```json\s*([\s\S]*?)```',      # Explicit json tag
+                r'```\s*([\s\S]*?)```',           # Generic code block
+                r'(\{[\s\S]*\})',                 # JSON object
+                r'(\[[\s\S]*\])',                 # JSON array
+            ]
+
+            parsed = False
+            for pattern in json_patterns:
+                match = re.search(pattern, transcript)
+                if match:
+                    content = match.group(1).strip()
+                    try:
+                        json.loads(content)
+                        passed = True
+                        evidence = f"Valid JSON (extracted via pattern: {pattern[:20]}...)"
+                        parsed = True
+                        break
+                    except json.JSONDecodeError:
+                        continue
+
+            if not parsed:
+                # Try entire transcript as last resort
+                try:
+                    json.loads(transcript)
+                    passed = True
+                    evidence = "Valid JSON (full transcript)"
+                except json.JSONDecodeError as e:
+                    passed = False
+                    evidence = f"No valid JSON found: {e}"
 
         elif etype == "max_words":
-            # Proper word counting with Unicode support
-            import unicodedata
-            # Normalize and split on whitespace
-            words = transcript.split()
-            # Filter empty strings from multiple spaces
-            words = [w for w in words if w]
+            # Proper word counting with punctuation normalization
+            import re
+
+            # Normalize: replace punctuation with spaces, collapse multiple spaces
+            normalized = re.sub(r'[^\w\s]', ' ', transcript)
+            normalized = re.sub(r'\s+', ' ', normalized).strip()
+
+            # Split on whitespace
+            words = normalized.split() if normalized else []
             word_count = len(words)
             limit = int(text)
             passed = word_count <= limit
@@ -307,11 +368,40 @@ def parse_semantic_response(response: str, expectations: List[Dict]) -> List[Dic
     """Parse Claude's response into structured results.
 
     MUST return exactly len(expectations) results.
-    Handles: malformed JSON, missing fields, wrong count.
-    """
-    results = []
-    lines = [l.strip() for l in response.strip().split('\n') if l.strip()]
 
+    Handles these edge cases in order:
+    1. Wrapped in Claude CLI format: {"result": "..."}
+    2. Top-level array: [...]
+    3. One JSON object per line
+    4. Fewer/more lines than expected
+    5. Malformed JSON on any line
+    """
+    raw = response.strip()
+
+    # Step 1: Handle Claude CLI wrapper {"result": "..."}
+    try:
+        outer = json.loads(raw)
+        if isinstance(outer, dict) and "result" in outer:
+            raw = outer["result"]
+            # result might be string or already parsed
+            if isinstance(raw, str):
+                raw = raw.strip()
+    except json.JSONDecodeError:
+        pass  # Not wrapped, continue with raw
+
+    # Step 2: Try parsing as top-level array
+    try:
+        arr = json.loads(raw)
+        if isinstance(arr, list):
+            lines = [json.dumps(obj) for obj in arr]
+        else:
+            lines = [json.dumps(arr)]  # Single object, not array
+    except json.JSONDecodeError:
+        # Step 3: Parse as one JSON object per line
+        lines = [l.strip() for l in raw.split('\n') if l.strip()]
+
+    # Step 4: Build results, handling count mismatch
+    results = []
     for i, exp in enumerate(expectations):
         if i < len(lines):
             try:
@@ -326,6 +416,7 @@ def parse_semantic_response(response: str, expectations: List[Dict]) -> List[Dic
                 passed = False
                 evidence = f"JSON parse error: {e}"
         else:
+            # Fewer lines than expectations
             passed = False
             evidence = "Missing response line"
 
@@ -336,6 +427,12 @@ def parse_semantic_response(response: str, expectations: List[Dict]) -> List[Dic
             "evidence": evidence,
             "grader_type": "llm"
         })
+
+    # Step 5: Log warning if more lines than expectations (don't fail)
+    if len(lines) > len(expectations):
+        import sys
+        print(f"WARNING: {len(lines)} response lines but only {len(expectations)} expectations",
+              file=sys.stderr)
 
     return results
 ```
@@ -484,27 +581,65 @@ def parse_grader_response(raw: str) -> Dict[str, Any]:
 
 #### 2.4 Expectation Format Normalization
 
-Normalize early, validate schema, preserve compatibility:
+Normalize early, validate schema, handle all known formats:
 
 ```python
 from typing import Union, Dict, List, Tuple
 
 VALID_EXPECTATION_TYPES = {"contains", "not_contains", "regex", "json_valid", "max_words", "semantic"}
 
+# Alternative key names that map to "text"
+TEXT_KEY_ALIASES = {"text", "pattern", "regex", "value", "expectation", "query"}
+
 def normalize_expectation(exp: Union[str, Dict]) -> Dict:
     """Convert any expectation format to canonical dict.
 
-    Maintains backward compatibility with string expectations.
+    Handles:
+    - String expectations -> {"text": str, "type": "contains"}
+    - Dict with "text" key -> standard format
+    - Dict with alternative keys (pattern, regex, value) -> maps to "text"
+    - Dict with "grader_type" -> ignored (not part of expectation input)
+    - Malformed text (non-string) -> converted to string
+
+    Raises:
+        ValueError: If no recognizable text field found or invalid type.
     """
     if isinstance(exp, str):
         return {"text": exp, "type": "contains"}
+
     if isinstance(exp, dict):
-        if "text" not in exp:
-            raise ValueError(f"Expectation missing required 'text' field: {exp}")
-        exp.setdefault("type", "contains")
-        if exp["type"] not in VALID_EXPECTATION_TYPES:
-            raise ValueError(f"Invalid expectation type '{exp['type']}': {exp}")
-        return exp.copy()
+        result = exp.copy()
+
+        # Find text field from various possible keys
+        text_value = None
+        for key in TEXT_KEY_ALIASES:
+            if key in result:
+                text_value = result.pop(key)  # Remove alias
+                break
+
+        if text_value is None:
+            raise ValueError(f"Expectation missing text field (tried: {TEXT_KEY_ALIASES}): {exp}")
+
+        # Ensure text is string
+        if not isinstance(text_value, str):
+            text_value = str(text_value)
+
+        result["text"] = text_value
+
+        # Set default type
+        result.setdefault("type", "contains")
+
+        # Validate type
+        if result["type"] not in VALID_EXPECTATION_TYPES:
+            raise ValueError(f"Invalid expectation type '{result['type']}'. Valid: {VALID_EXPECTATION_TYPES}")
+
+        # Remove grader_type if present (not an input field)
+        result.pop("grader_type", None)
+        result.pop("passed", None)
+        result.pop("evidence", None)
+
+        return result
+
     raise ValueError(f"Expectation must be string or dict, got {type(exp).__name__}")
 
 def normalize_all_expectations(expectations: List) -> Tuple[List[Dict], List[str]]:
@@ -572,6 +707,8 @@ class InlineEvaluator:
 
 #### 3.2 Timeout Integration
 
+**TimeoutStrategy** is wired into ALL subprocess operations:
+
 ```python
 import time
 from typing import Callable, TypeVar, Tuple
@@ -581,9 +718,10 @@ T = TypeVar('T')
 class TimeoutStrategy:
     """Graceful timeout handling with configurable retries.
 
-    Usage:
-        timeout = TimeoutStrategy(timeout=60, retries=2)
-        success, result = timeout.execute(run_transcript_generation, entry)
+    Wired into:
+    - Transcript generation (generate_transcripts_parallel)
+    - Batch semantic grading (grade_semantic_batch)
+    - Single semantic grading (grade_semantic_single)
     """
 
     def __init__(self, timeout: int = 60, retries: int = 2):
@@ -611,7 +749,57 @@ class TimeoutStrategy:
                 break
 
         return False, last_error or "Unknown error"
+
+
+# === WIRING INTO SUBPROCESS PATHS ===
+
+def run_transcript_with_timeout(entry: dict, timeout_strategy: TimeoutStrategy) -> Tuple[dict, Optional[str]]:
+    """Generate transcript with timeout strategy applied."""
+    def _run(timeout: int):
+        return subprocess.run(
+            ["claude", "-p", entry["prompt"], "--plugin-dir", str(cwd)],
+            capture_output=True, text=True, timeout=timeout
+        )
+
+    success, result = timeout_strategy.execute(_run)
+    if success:
+        return (entry, result.stdout)
+    return (entry, None)
+
+
+def grade_semantic_batch_with_timeout(transcript: str, expectations: List[Dict],
+                                       timeout_strategy: TimeoutStrategy) -> List[Dict]:
+    """Batch semantic grading with timeout strategy applied."""
+    def _run(timeout: int):
+        prompt = build_semantic_prompt(transcript, expectations)
+        return subprocess.run(
+            ["claude", "-p", prompt, "--output-format", "json"],
+            capture_output=True, text=True, timeout=timeout
+        )
+
+    success, result = timeout_strategy.execute(_run)
+    if not success:
+        # Return all failures with timeout message
+        return [{
+            "text": e["text"],
+            "type": "semantic",
+            "passed": False,
+            "evidence": result,  # Error message
+            "grader_type": "llm"
+        } for e in expectations]
+
+    return parse_semantic_response(result.stdout, expectations)
+
+
+# Default timeout configurations for each operation type
+DEFAULT_TIMEOUTS = {
+    "transcript_generation": TimeoutStrategy(timeout=60, retries=2),
+    "semantic_batch": TimeoutStrategy(timeout=120, retries=1),
+    "semantic_single": TimeoutStrategy(timeout=60, retries=1),
+}
 ```
+
+**Inline path note:** No timeout handling needed - Claude evaluates directly within session context.
 
 ### 4. Error Handling
 
@@ -700,7 +888,7 @@ def grade_with_partial_failure(transcript: str, expectations: List[Dict]) -> Dic
 
 ```python
 def test_inline_subprocess_parity():
-    """Verify inline and subprocess paths produce identical results."""
+    """Verify inline and subprocess paths produce FULLY identical results."""
     test_plugin = load_test_plugin()
     queries = load_trigger_queries()
     evals = load_functional_evals()
@@ -709,17 +897,25 @@ def test_inline_subprocess_parity():
     inline_result = run_inline_evaluation(test_plugin, queries, evals)
     subprocess_result = run_subprocess_evaluation(test_plugin, queries, evals)
 
-    # Compare schemas
-    assert inline_result.keys() == subprocess_result.keys()
-    assert inline_result["summary"] == subprocess_result["summary"]
+    # Use the full parity check defined in schema section
+    assert_full_parity(inline_result, subprocess_result)
 
-    # Compare expectations within tolerance
-    for i, (inline_exp, sub_exp) in enumerate(zip(
-        inline_result["expectations"],
-        subprocess_result["expectations"]
-    )):
-        assert inline_exp["passed"] == sub_exp["passed"], \
-            f"Expectation {i} mismatch: inline={inline_exp['passed']}, sub={sub_exp['passed']}"
+def test_runtime_mode_switching():
+    """Verify HM_EVAL_MODE switches between paths correctly."""
+    import os
+
+    # Test inline mode
+    os.environ["HM_EVAL_MODE"] = "inline"
+    evaluator = get_evaluator({})
+    assert isinstance(evaluator, InlineEvaluator)
+
+    # Test subprocess mode
+    os.environ["HM_EVAL_MODE"] = "subprocess"
+    evaluator = get_evaluator({})
+    assert isinstance(evaluator, SubprocessEvaluator)
+
+    # Cleanup
+    del os.environ["HM_EVAL_MODE"]
 ```
 
 ### Performance Benchmarks
@@ -800,7 +996,67 @@ pytest tests/ -v --integration
 # Performance: optimize loop time < 2 minutes
 ```
 
-## Rollback Criteria
+## Runtime Switching & Rollback Mechanics
+
+### Environment Variable Control
+
+```bash
+# Force inline evaluation path (default for optimize loop)
+HM_EVAL_MODE=inline
+
+# Force subprocess evaluation path (for debugging/testing)
+HM_EVAL_MODE=subprocess
+
+# Auto-select based on context (default)
+HM_EVAL_MODE=auto
+```
+
+### Configuration in hm.json
+
+```json
+{
+  "evaluation": {
+    "mode": "auto",
+    "fallback_on_error": true,
+    "timeout_strategy": {
+      "transcript_generation": {"timeout": 60, "retries": 2},
+      "semantic_batch": {"timeout": 120, "retries": 1}
+    }
+  }
+}
+```
+
+### Rollback Triggers
+
+Automatic rollback to subprocess path occurs when:
+
+| Trigger | Threshold | Action |
+|---------|-----------|--------|
+| Inline parse failures | > 5% of evaluations | Log warning, continue inline |
+| Inline score drift | > 10% difference from subprocess | Force subprocess for next iteration |
+| Inline exceptions | Any unhandled exception | Immediate fallback to subprocess |
+| User override | HM_EVAL_MODE=subprocess | Respect user choice |
+
+### Rollback Procedure
+
+```python
+def get_evaluator(config: dict) -> Union[InlineEvaluator, SubprocessEvaluator]:
+    """Select evaluator based on config and runtime conditions."""
+    mode = os.environ.get("HM_EVAL_MODE", config.get("evaluation", {}).get("mode", "auto"))
+
+    if mode == "subprocess":
+        return SubprocessEvaluator(config)
+    elif mode == "inline":
+        return InlineEvaluator(config)
+    else:  # auto
+        # Check for recent inline failures
+        if has_recent_inline_failures(config):
+            log_warning("Recent inline failures detected, using subprocess")
+            return SubprocessEvaluator(config)
+        return InlineEvaluator(config)
+```
+
+### Phase Rollback Criteria
 
 If any phase fails acceptance gate:
 
@@ -809,8 +1065,35 @@ If any phase fails acceptance gate:
    - Test output
    - Error messages
    - Environment details
-3. **Fix issue** before re-attempting phase
-4. **If unfixable in 2 attempts**, escalate to human decision
+3. **Automatic rollback**:
+   - Set `HM_EVAL_MODE=subprocess` in environment
+   - Log rollback event to `hm-results.tsv`
+4. **Fix issue** before re-attempting phase
+5. **If unfixable in 2 attempts**, escalate to human decision
+
+### Regression Detection
+
+After each phase deployment, monitor for:
+
+```python
+def detect_regression(before_metrics: dict, after_metrics: dict) -> List[str]:
+    """Detect unacceptable regressions after deployment."""
+    regressions = []
+
+    # Score distribution must stay within 5%
+    if abs(after_metrics["mean_score"] - before_metrics["mean_score"]) > 5:
+        regressions.append(f"Score drift: {before_metrics['mean_score']} -> {after_metrics['mean_score']}")
+
+    # Error rate must not increase
+    if after_metrics["error_rate"] > before_metrics["error_rate"] * 1.1:
+        regressions.append(f"Error rate increase: {before_metrics['error_rate']} -> {after_metrics['error_rate']}")
+
+    # Latency must improve, not degrade
+    if after_metrics["p95_latency"] > before_metrics["p95_latency"]:
+        regressions.append(f"Latency regression: {before_metrics['p95_latency']}s -> {after_metrics['p95_latency']}s")
+
+    return regressions
+```
 
 ## Success Metrics
 
