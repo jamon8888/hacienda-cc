@@ -273,7 +273,7 @@ def read_skill_name(plugin_dir: Path) -> str:
     """Read skill name from SKILL.md frontmatter."""
     import re
     for skill_md in plugin_dir.glob("skills/*/SKILL.md"):
-        text = skill_md.read_text()
+        text = skill_md.read_text(encoding="utf-8")
         m = re.search(r'^name:\s*(\S+)', text, re.MULTILINE)
         if m:
             return m.group(1)
